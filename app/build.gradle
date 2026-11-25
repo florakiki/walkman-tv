@@ -126,8 +126,11 @@ android.applicationVariants.all { variant ->
     variant.outputs.each { output ->
         def abi = output.getFilter(OutputFile.ABI)
         def tag = abi ?: "universal"
-        // 电视版文件名保持原样（kitv-music-1.0.0-debug-…），手机版前面加 -mobile 区分。
-        def prefix = (variant.flavorName == "tv") ? "kitv-music" : "kitv-music-${variant.flavorName}"
+        // 包文件名直接标注电视版 / 手机版（Yang 2026-11-25 定）：
+        // 电视版 kitv-music-电视版-1.0.0-debug-universal-debug.apk，
+        // 手机版 kitv-music-手机版-1.0.0-debug-universal-debug.apk。
+        // 手机版只分发通用版（不再出 arm64 分包），编包时分包仍会生成，只是不传。
+        def prefix = (variant.flavorName == "tv") ? "kitv-music-电视版" : "kitv-music-手机版"
         output.outputFileName = "${prefix}-${variant.versionName}-${tag}-${variant.buildType.name}.apk"
         // CI 上的测试包 versionCode 每次递增（正式版本号 × 100000 + 运行编号），测试包之间总能覆盖安装，
         // 不会被电视安装器以「版本相同」拒绝。

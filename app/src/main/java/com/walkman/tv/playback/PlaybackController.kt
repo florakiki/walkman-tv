@@ -81,6 +81,19 @@ class PlaybackController(
      *  successful play, on a fresh playAt(), or once we've given up and skipped to next. */
     private var networkRetryCount: Int = 0
 
+    /** Cross-source retry already attempted for this track id (play-time failure path).
+     *  One attempt per track: if the other platform's URL is bad too, we advance instead
+     *  of bouncing between platforms forever. Reset on a fresh playAt(). */
+    private var crossSourceTriedFor: String? = null
+
+    /** Background pre-resolution of the next track in the queue. [preloadCache] holds a
+     *  fully-resolved URL (already cross-source-fallback'd by resolveMusicURL) so the
+     *  next song starts without waiting for script calls; a dead next track is
+     *  discovered — and its replacement found — before the user reaches it. */
+    private var preloadJob: Job? = null
+    private val preloadCache = mutableMapOf<String, ResolvedTrack>()
+    private var preloadedForIndex = -1
+
     /** Number of consecutive *tracks* that have failed back-to-back (resolve failed or an
      *  unrecoverable player error). Auto-skip to next on each failure; stop only once this hits
      *  [MAX_CONSECUTIVE_FAILURES]. Reset to 0 when any track actually reaches READY, and on a
@@ -294,6 +307,8 @@ class PlaybackController(
                     // A track actually started — clear the consecutive-failure streak.
                     consecutiveFailures = 0
                     _state.value = _state.value.copy(durationMs = player.duration.coerceAtLeast(0))
+                    // Start resolving the next track in the background while this one plays.
+                    preloadNext()
                 }
             }
 
@@ -304,6 +319,12 @@ class PlaybackController(
                 val isFormatReject = error.errorCode in FORMAT_REJECT_CODES
                 val current = lastAttemptedQuality
                 val track = _state.value.currentTrack
+                // Format reject already at the lowest tier: this platform has nothing left —
+                // try the same song from another platform before giving up on it.
+                if (isFormatReject && track != null && current == Quality.K128) {
+                    tryCrossSourceOrAdvance(track, error.errorCodeName)
+                    return
+                }
                 if (isFormatReject && track != null && current != null && current != Quality.K128) {
                     val full = Quality.orderedHighToLow
                     val idx = full.indexOf(current)
@@ -320,7 +341,7 @@ class PlaybackController(
                     return
                 }
                 // Transient network — exponential backoff retry up to MAX_NETWORK_RETRIES.
-                // After that, advance to next so playback doesn't dead-stop the queue.
+                // After that, try another platform for the same song before auto-skipping.
                 if (error.errorCode in NETWORK_RETRY_CODES && track != null) {
                     if (networkRetryCount < MAX_NETWORK_RETRIES) {
                         networkRetryCount++
@@ -344,16 +365,20 @@ class PlaybackController(
                         }
                         return
                     }
-                    // Retries exhausted — this track has failed; auto-skip (counts toward the
-                    // consecutive-failure limit).
+                    // Retries exhausted — try another platform for the same song first.
                     android.util.Log.w(
                         "PlaybackController",
-                        "network retries exhausted on ${track.name}; skipping to next",
+                        "network retries exhausted on ${track.name}; trying other sources",
                     )
-                    failAndAdvance("网络不稳定")
+                    tryCrossSourceOrAdvance(track, "网络不稳定")
                     return
                 }
-                // Any other error — this track failed; auto-skip (or stop after too many in a row).
+                // Any other error — try another platform for the same song; only auto-skip
+                // (or stop after too many in a row) once no platform can play it.
+                if (track != null) {
+                    tryCrossSourceOrAdvance(track, error.errorCodeName)
+                    return
+                }
                 failAndAdvance(error.errorCodeName)
             }
         })
@@ -370,6 +395,9 @@ class PlaybackController(
     private fun setQueueInternal(tracks: List<Track>, startIndex: Int = 0, autoPlay: Boolean = true) {
         if (tracks.isEmpty()) return
         consecutiveFailures = 0 // fresh user-initiated queue — start the failure streak over
+        preloadJob?.cancel()
+        preloadCache.clear()
+        preloadedForIndex = -1
         _state.value = _state.value.copy(queue = tracks, index = startIndex.coerceIn(0, tracks.size - 1))
         if (autoPlay) playAt(_state.value.index)
     }
@@ -407,6 +435,10 @@ class PlaybackController(
         if (qualityCap == null) {
             lastAttemptedQuality = null
             networkRetryCount = 0
+            crossSourceTriedFor = null
+            // A new track is starting — the old preload (if any) is for a different next.
+            preloadJob?.cancel()
+            preloadedForIndex = -1
             // Silence the previous song right away. Resolving can take a long time with a slow or
             // dead source (every quality tier × 15s script timeout, then other-platform lookups),
             // and the old track playing on under the new title looked like "切歌没成功".
@@ -424,6 +456,9 @@ class PlaybackController(
             // Local fast-path: downloaded tracks + SAF-imported tracks skip the online cascade.
             // localUrlResolver is set up at AppContainer init time.
             val localUrl = runCatching { localUrlResolver?.invoke(track) }.getOrNull()
+            // Preloaded URL from the background preload (only for a fresh attempt — quality
+            // cascade retries always resolve fresh so an expired preloaded URL can't loop).
+            val cached = if (qualityCap == null) preloadCache.remove(track.id) else null
             val resolved = if (localUrl != null) {
                 Result.success(
                     ResolvedTrack(
@@ -433,6 +468,8 @@ class PlaybackController(
                         warning = null,
                     ),
                 )
+            } else if (cached != null) {
+                Result.success(cached)
             } else {
                 runCatching { sources.resolveMusicURL(track, effectivePreferred) }
             }
@@ -545,6 +582,75 @@ class PlaybackController(
     }
 
     /**
+     * Play-time cross-source fallback (第 6 条)：解析时拿到的地址播起来才发现是坏的
+     * （坏文件 / 死链），先在其它平台搜同一首歌换个地址再播，播起来为止；哪个平台都
+     * 播不了才跳下一首。同一首歌只换一次源，避免在坏地址之间来回跳。
+     */
+    private fun tryCrossSourceOrAdvance(track: Track, reason: String) {
+        if (crossSourceTriedFor == track.id) {
+            failAndAdvance(reason)
+            return
+        }
+        crossSourceTriedFor = track.id
+        _state.value = _state.value.copy(
+            warning = "这首歌当前源播不了，正在换其它源…",
+            resolving = true,
+            error = null,
+        )
+        val trackId = track.id
+        scope.launch {
+            val res = runCatching { sources.resolveOtherSource(track, preferredQuality) }.getOrNull()
+            // 用户切歌了就丢弃换好的地址，别塞给新歌。
+            if (_state.value.currentTrack?.id != trackId) return@launch
+            if (res != null) {
+                networkRetryCount = 0
+                playResolvedOrFail(track, Result.success(res))
+            } else {
+                failAndAdvance(reason)
+            }
+        }
+    }
+
+    /**
+     * Preload the next track (第 7 条)：这首播着的时候，后台把下一首的地址先解析出来
+     * （走 resolveMusicURL，里面自带跨平台换源——源不行提前就换好了），存进缓存；
+     * 播到那首时直接用缓存地址，不用再等脚本逐档解析。解析失败就不缓存，播到那首时
+     * 走正常解析 + 播时换源兜底。
+     */
+    private fun preloadNext() {
+        val s = _state.value
+        if (s.queue.isEmpty() || s.index !in s.queue.indices) return
+        val nextIdx = when {
+            s.shuffle -> if (s.queue.size <= 1) return else randomOther(s.index, s.queue.size)
+            s.index + 1 < s.queue.size -> s.index + 1
+            s.repeatMode != RepeatMode.OFF -> 0
+            else -> return
+        }
+        if (nextIdx == preloadedForIndex) return
+        preloadedForIndex = nextIdx
+        val currentIndex = s.index
+        preloadJob?.cancel()
+        preloadJob = scope.launch {
+            val track = _state.value.queue.getOrNull(nextIdx) ?: return@launch
+            val local = runCatching { localUrlResolver?.invoke(track) }.getOrNull()
+            val res = if (local != null) {
+                ResolvedTrack(
+                    url = local,
+                    origin = ResolveOrigin.LocalFile,
+                    quality = track.qualities.firstOrNull() ?: preferredQuality,
+                    warning = null,
+                )
+            } else {
+                runCatching { sources.resolveMusicURL(track, preferredQuality) }.getOrNull()
+            }
+            // 用户已经切到别的歌就丢弃这次预载。
+            if (res != null && _state.value.index == currentIndex) {
+                preloadCache[track.id] = res
+            }
+        }
+    }
+
+    /**
      * Toggle audio offload (DSP direct path). Some vendor audio HALs (小米/鸿蒙/坚果 etc.)
      * advertise offload support but crash natively when fed FLAC/Hi-Res through it, so this
      * is exposed as a settings switch. Takes effect on the next format change / track switch.
@@ -630,6 +736,9 @@ class PlaybackController(
     fun stop() {
         player.stop()
         player.clearMediaItems()
+        preloadJob?.cancel()
+        preloadCache.clear()
+        preloadedForIndex = -1
         _state.value = PlaybackState()
         _lyrics.value = emptyList()
     }

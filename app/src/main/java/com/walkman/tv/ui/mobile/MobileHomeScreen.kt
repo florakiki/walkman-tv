@@ -4,6 +4,7 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -81,7 +82,11 @@ fun MobileHomeScreen(
         appContainer.homeStore.loadIfNeeded(settings.homeSources)
     }
 
-    LazyColumn(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        // 平板横屏一排只有 2 张、海报占半屏的原因：以前写死 chunked(2)。按实际宽度算列数，
+        // 一张卡约 170dp 宽：手机竖屏 2 列，平板横屏 4-6 列，海报不糊也不占半屏。
+        val columns = ((maxWidth - 32.dp) / 170.dp).toInt().coerceIn(2, 6)
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         item {
             Spacer(Modifier.height(8.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -168,14 +173,8 @@ fun MobileHomeScreen(
                         Text("推荐歌单拉取失败，下拉不了——点右上角刷新试试，或检查网络。", color = AppColors.TextMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
                     }
                 } else {
-                    items(home.recommendations.chunked(2)) { pair ->
-                        Row(Modifier.fillMaxWidth()) {
-                            pair.forEachIndexed { i, info ->
-                                SonglistCard(info, Modifier.weight(1f), onOpenSonglist)
-                                if (i == 0) Spacer(Modifier.width(12.dp))
-                            }
-                            if (pair.size == 1) Spacer(Modifier.weight(1f))
-                        }
+                    items(home.recommendations.chunked(columns)) { row ->
+                        SonglistRow(row, columns, onOpenSonglist)
                         Spacer(Modifier.height(12.dp))
                     }
                 }
@@ -202,7 +201,7 @@ fun MobileHomeScreen(
             }
             1 -> {
                 item { SectionHeader("全部歌单", actionLabel = null) {} }
-                item { AllSonglistsGrid(onOpenSonglist) }
+                item { AllSonglistsGrid(columns, onOpenSonglist) }
             }
             2 -> {
                 item { SectionHeader("排行榜", actionLabel = null) {} }
@@ -233,6 +232,7 @@ fun MobileHomeScreen(
             }
         }
         item { Spacer(Modifier.height(96.dp)) }
+        }
     }
 }
 
@@ -296,9 +296,24 @@ private fun SonglistCard(info: SonglistInfo, modifier: Modifier = Modifier, onOp
     }
 }
 
+/** 歌单卡片行：按列数排，一行没排满用空白补齐，卡片等宽。 */
+@Composable
+private fun SonglistRow(cards: List<SonglistInfo>, columns: Int, onOpen: (SonglistInfo) -> Unit) {
+    Row(Modifier.fillMaxWidth()) {
+        for (slot in 0 until columns) {
+            if (slot > 0) Spacer(Modifier.width(12.dp))
+            if (slot < cards.size) {
+                SonglistCard(cards[slot], Modifier.weight(1f), onOpen)
+            } else {
+                Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
 /** 歌单 tab：每平台取推荐歌单前 8 个拼成网格。 */
 @Composable
-private fun AllSonglistsGrid(onOpen: (SonglistInfo) -> Unit) {
+private fun AllSonglistsGrid(columns: Int, onOpen: (SonglistInfo) -> Unit) {
     val settings by appContainer.settingsStore.settings.collectAsState()
     var lists by remember { mutableStateOf<List<SonglistInfo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
@@ -327,14 +342,8 @@ private fun AllSonglistsGrid(onOpen: (SonglistInfo) -> Unit) {
         return
     }
     Column {
-        lists.chunked(2).forEach { pair ->
-            Row(Modifier.fillMaxWidth()) {
-                pair.forEachIndexed { i, info ->
-                    SonglistCard(info, Modifier.weight(1f), onOpen)
-                    if (i == 0) Spacer(Modifier.width(12.dp))
-                }
-                if (pair.size == 1) Spacer(Modifier.weight(1f))
-            }
+        lists.chunked(columns).forEach { row ->
+            SonglistRow(row, columns, onOpen)
             Spacer(Modifier.height(12.dp))
         }
     }

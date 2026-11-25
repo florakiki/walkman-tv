@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.NavigationBar
@@ -115,7 +116,10 @@ fun MobileRootScreen(modifier: Modifier = Modifier) {
 
     Box(modifier.fillMaxSize().background(AppColors.BgDeep)) {
         if (wide) {
-            Row(Modifier.fillMaxSize()) {
+            // 宽屏以前没有迷你播放条：播放页在右侧栏里，关掉就找不到正在播的歌。
+            // 底部常驻一条（播放页开着时不用它，关掉就一直在），点它回播放页。
+            Column(Modifier.fillMaxSize()) {
+            Row(Modifier.weight(1f).fillMaxWidth()) {
                 NavigationRail(
                     containerColor = Color.White,
                     header = {
@@ -155,6 +159,8 @@ fun MobileRootScreen(modifier: Modifier = Modifier) {
                         MobilePlayerScreen(onClose = { showPlayer = false })
                     }
                 }
+            }
+            if (!showPlayer) MiniPlayerBar(onOpenPlayer = openPlayer)
             }
         } else {
             Column(Modifier.fillMaxSize()) {
@@ -234,7 +240,7 @@ private fun TabContent(
     }
 }
 
-/** 底部迷你播放条：封面 + 歌名/歌手 + 播放暂停；点一下进播放页。没在播就藏起来。 */
+/** 底部迷你播放条：封面 + 歌名/歌手 + 播放暂停 + 下一首；点一下进播放页。没在播就藏起来。 */
 @Composable
 private fun MiniPlayerBar(onOpenPlayer: () -> Unit) {
     val controller = appContainer.playbackController
@@ -271,6 +277,14 @@ private fun MiniPlayerBar(onOpenPlayer: () -> Unit) {
             Icon(
                 if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                 contentDescription = if (state.isPlaying) "暂停" else "播放",
+                tint = AppColors.BrandPrimary,
+                modifier = Modifier.size(28.dp),
+            )
+        }
+        IconButton(onClick = { controller.next() }) {
+            Icon(
+                Icons.Filled.SkipNext,
+                contentDescription = "下一首",
                 tint = AppColors.BrandPrimary,
                 modifier = Modifier.size(28.dp),
             )

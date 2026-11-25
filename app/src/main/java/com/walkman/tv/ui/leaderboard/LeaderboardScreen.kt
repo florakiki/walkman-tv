@@ -15,6 +15,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -46,17 +47,59 @@ fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var loadingTracks by remember { mutableStateOf(false) }
 
+    // 切榜慢的原因：每次换平台/换榜都重新拉网（榜单列表、榜单歌曲都是现调接口，一次
+    // 1-3 秒），没有任何缓存。榜单内容几分钟内不会变，缓存起来：有缓存先直接显示，
+    // 后台再悄悄拉一遍新的，内容真变了才更新，回来还是这张榜就不用再转圈。
+    val boardsCache = remember { mutableStateMapOf<SourceID, List<BoardInfo>>() }
+    val tracksCache = remember { mutableStateMapOf<String, List<Track>>() }
+    // 每个平台上次选中的榜，切换平台再回来还停在原来那张榜上。
+    val lastSelectedBySource = remember { mutableStateMapOf<SourceID, String>() }
+
     // fetchOr (not runCatching): a cancelled effect must die at the fetch, not swallow the
     // CancellationException and stomp state its restarted replacement already wrote.
     LaunchedEffect(source) {
-        boards = fetchOr(emptyList()) { appContainer.boards.serviceFor(source)?.fetchBoards() ?: emptyList() }
-        selected = boards.firstOrNull()
+        val cached = boardsCache[source]
+        if (cached != null) {
+            boards = cached
+            selected = cached.firstOrNull { it.id == lastSelectedBySource[source] }
+                ?: cached.firstOrNull()
+            // 后台刷新：榜单名字/封面可能变，回来还是这个平台、内容真变了才更新。
+            val fresh = fetchOr(emptyList()) { appContainer.boards.serviceFor(source)?.fetchBoards() ?: emptyList() }
+            if (fresh.isNotEmpty() && fresh != cached) {
+                boardsCache[source] = fresh
+                boards = fresh
+                val selId = selected?.id
+                if (selId == null || fresh.none { it.id == selId }) {
+                    selected = fresh.firstOrNull { it.id == lastSelectedBySource[source] }
+                        ?: fresh.firstOrNull()
+                }
+            }
+        } else {
+            boards = fetchOr(emptyList()) { appContainer.boards.serviceFor(source)?.fetchBoards() ?: emptyList() }
+            if (boards.isNotEmpty()) boardsCache[source] = boards
+            selected = boards.firstOrNull { it.id == lastSelectedBySource[source] }
+                ?: boards.firstOrNull()
+        }
     }
     LaunchedEffect(selected) {
         val b = selected ?: return@LaunchedEffect
-        loadingTracks = true
-        tracks = fetchOr(emptyList()) { appContainer.boards.serviceFor(b.source)?.fetchTracks(b.bangid, 1) ?: emptyList() }
-        loadingTracks = false
+        val key = "${b.source.key}_${b.id}"
+        val cached = tracksCache[key]
+        if (cached != null) {
+            tracks = cached
+            loadingTracks = false
+            // 后台刷新榜单歌曲，回来还是这张榜、内容真变了才更新。
+            val fresh = fetchOr(emptyList()) { appContainer.boards.serviceFor(b.source)?.fetchTracks(b.bangid, 1) ?: emptyList() }
+            if (fresh.isNotEmpty() && fresh != cached && selected?.id == b.id) {
+                tracksCache[key] = fresh
+                tracks = fresh
+            }
+        } else {
+            loadingTracks = true
+            tracks = fetchOr(emptyList()) { appContainer.boards.serviceFor(b.source)?.fetchTracks(b.bangid, 1) ?: emptyList() }
+            loadingTracks = false
+            if (tracks.isNotEmpty()) tracksCache[key] = tracks
+        }
     }
 
     Row(modifier = modifier.fillMaxSize().padding(top = 8.dp)) {
@@ -80,7 +123,7 @@ fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
             val uniqueBoards = remember(boards) { boards.distinctBy { it.id } }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(uniqueBoards, key = { it.id }) { b ->
-                    TvFocusable(onClick = { selected = b }, modifier = Modifier.fillMaxWidth()) {
+                    TvFocusable(onClick = { selected = b; lastSelectedBySource[b.source] = b.id }, modifier = Modifier.fillMaxWidth()) {
                         Text(
                             b.name,
                             color = if (selected?.id == b.id) AppColors.AccentGreen else AppColors.TextPrimary,

@@ -107,6 +107,12 @@ class SourceManager(
         throw SourceException("这首 ${track.source.displayName} 歌曲无法获取播放地址，换一首或换个能用的脚本")
     }
 
+    /** Play-time cross-source fallback (第 6 条)：解析时拿到的地址播起来才发现是坏的，
+     *  换其它平台的同一首歌再试。解析阶段的换源在 resolveMusicURL 里已经做了，这里是
+     *  播放器报错后才走的第二道。 */
+    suspend fun resolveOtherSource(track: Track, preferred: Quality): ResolvedTrack? =
+        tryOtherSources(track, preferred)
+
     private suspend fun tryOtherSources(track: Track, preferred: Quality): ResolvedTrack? {
         val alternatives = otherSourceFinder.findMatches(track)
         if (alternatives.isEmpty()) return null

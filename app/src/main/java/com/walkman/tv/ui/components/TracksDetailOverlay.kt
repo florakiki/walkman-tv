@@ -2,6 +2,7 @@ package com.walkman.tv.ui.components
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,10 +45,14 @@ fun TracksDetailOverlay(
 ) {
     BackHandler { onBack() }
     Column(
+        // Own focus group: while the detail list is open, focus restoration stays inside
+        // it instead of dropping back to the grid card underneath (which is painted over
+        // and invisible — the old behaviour that left focus wandering).
         modifier = Modifier
             .fillMaxSize()
             .background(AppColors.BgDeep)
-            .padding(top = 8.dp),
+            .padding(top = 8.dp)
+            .focusGroup(),
     ) {
         Text(
             title,

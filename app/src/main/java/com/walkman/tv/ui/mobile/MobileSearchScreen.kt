@@ -2,6 +2,7 @@
 
 package com.walkman.tv.ui.mobile
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AssistChip
@@ -51,6 +53,8 @@ import com.walkman.tv.data.model.SonglistInfo
 import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.ui.appContainer
+import com.walkman.tv.ui.components.AlbumGroup
+import com.walkman.tv.ui.components.groupAlbums
 import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
 import kotlinx.coroutines.async
@@ -112,7 +116,12 @@ fun MobileSearchScreen(
     }
 
     val playingId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
+    // 搜歌手 → 专辑：搜索结果里每首歌都带专辑名，按专辑聚合（见 AlbumGroups）。
+    val albums = remember(tracks) { groupAlbums(tracks) }
+    var openAlbum by remember { mutableStateOf<AlbumGroup?>(null) }
+    LaunchedEffect(tracks) { openAlbum = null }
 
+    Box(modifier.fillMaxSize()) {
     Column(modifier.fillMaxSize().padding(horizontal = 16.dp)) {
         Spacer(Modifier.height(8.dp))
         OutlinedTextField(
@@ -201,6 +210,24 @@ fun MobileSearchScreen(
                         )
                     }
                 }
+                if (albums.isNotEmpty()) {
+                    item {
+                        Text("专辑", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, modifier = Modifier.padding(vertical = 6.dp))
+                    }
+                    items(albums) { album ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable { openAlbum = album }.padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CoverImage(album.picURL, Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(album.name, fontSize = 15.sp, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${album.singer} · ${album.tracks.size} 首 · ${album.source.displayName}", fontSize = 12.sp, color = AppColors.TextSecondary, maxLines = 1)
+                            }
+                        }
+                    }
+                }
                 if (songlists.isNotEmpty()) {
                     item {
                         Text("歌单", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, modifier = Modifier.padding(vertical = 6.dp))
@@ -219,6 +246,58 @@ fun MobileSearchScreen(
                         }
                     }
                 }
+            }
+            item { Spacer(Modifier.height(96.dp)) }
+        }
+    }
+    openAlbum?.let { album ->
+        AlbumDetailView(
+            album = album,
+            playingId = playingId,
+            onBack = { openAlbum = null },
+            onOpenPlayer = onOpenPlayer,
+        )
+    }
+    }
+}
+
+/** 专辑详情：点专辑进来，列出这张专辑的歌，点歌直接播。 */
+@Composable
+private fun AlbumDetailView(
+    album: AlbumGroup,
+    playingId: String?,
+    onBack: () -> Unit,
+    onOpenPlayer: () -> Unit,
+) {
+    androidx.activity.compose.BackHandler { onBack() }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppColors.BgDeep)
+            .padding(horizontal = 16.dp),
+    ) {
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "返回", tint = AppColors.TextPrimary)
+            }
+            Column(Modifier.weight(1f)) {
+                Text(album.name, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("${album.singer} · ${album.tracks.size} 首 · ${album.source.displayName}", fontSize = 13.sp, color = AppColors.TextSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(Modifier.fillMaxSize()) {
+            items(album.tracks) { track ->
+                val idx = album.tracks.indexOf(track)
+                TrackRowMobile(
+                    track = track,
+                    isPlaying = track.id == playingId,
+                    onClick = {
+                        playList(album.tracks, idx)
+                        onOpenPlayer()
+                    },
+                )
             }
             item { Spacer(Modifier.height(96.dp)) }
         }

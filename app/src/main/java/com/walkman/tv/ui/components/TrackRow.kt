@@ -42,6 +42,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -261,11 +266,17 @@ fun TrackList(
             .toSet()
     }
     val listState = rememberLazyListState()
-    val firstFocus = remember { FocusRequester() }
-    // Holds a FocusRequester for the row most recently clicked-to-play. When the player
-    // overlay closes we re-request focus on this row so the user returns to the same line
-    // they launched playback from.
-    val lastClickedFocus = remember { FocusRequester() }
+    // One FocusRequester per row, stable across recompositions: explicit Up/Down handling
+    // below moves focus through these, so navigation never depends on Compose's spatial
+    // focus search alone — that search is what left focus wandering to the TopNav instead
+    // of landing on a song in the 热歌榜 detail list.
+    val rowFocusers = remember { mutableMapOf<Int, FocusRequester>() }
+    val focuserFor: (Int) -> FocusRequester = { rowFocusers.getOrPut(it) { FocusRequester() } }
+    // Index of the row that currently holds focus (-1 = focus is outside the list).
+    var focusedIndex by remember(tracks) { androidx.compose.runtime.mutableStateOf(-1) }
+    // Holds the index of the row most recently clicked-to-play. When the player overlay
+    // closes we re-request focus on this row so the user returns to the same line they
+    // launched playback from.
     var lastClickedIndex by remember { androidx.compose.runtime.mutableStateOf(-1) }
     val scope = rememberCoroutineScope()
     val atTop by remember {
@@ -279,15 +290,23 @@ fun TrackList(
             listState.animateScrollToItem(0)
             // Wait a frame so item 0 is composed/visible before requesting focus.
             delay(80)
-            runCatching { firstFocus.requestFocus() }
+            focuserFor(0).requestFocus()
         }
     }
 
     if (initialFocus) {
         LaunchedEffect(tracks.firstOrNull()?.id) {
-            // Wait for item 0 to compose before requesting focus.
-            delay(80)
-            runCatching { firstFocus.requestFocus() }
+            // A one-shot focus request silently fails when the row isn't laid out yet.
+            // Retry until the first row actually takes focus (onFocusChanged reports it
+            // via focusedIndex) — but stop the moment focus is already inside the list,
+            // so a late retry never yanks focus back from a row the user already moved to.
+            // (This Compose version's requestFocus() returns Unit, so success is read from
+            // the focus state, not a return value.)
+            for (attempt in 0 until 20) {
+                if (focusedIndex >= 0) break
+                focuserFor(0).requestFocus()
+                delay(100)
+            }
         }
     }
 
@@ -299,7 +318,8 @@ fun TrackList(
                 runCatching { listState.animateScrollToItem(lastClickedIndex.coerceAtMost(tracks.size - 1)) }
                 repeat(5) {
                     delay(60)
-                    if (runCatching { lastClickedFocus.requestFocus() }.isSuccess) return@collect
+                    focuserFor(lastClickedIndex).requestFocus()
+                    if (focusedIndex == lastClickedIndex) return@collect
                 }
             }
         }
@@ -316,21 +336,41 @@ fun TrackList(
         state = listState,
         // focusRestorer() remembers which row was last focused; when the player overlay closes
         // and focus drops back into the list, it lands on that same row (instead of resetting).
-        modifier = modifier.focusRestorer(),
+        // Explicit Up/Down: step focus through the rows' own FocusRequesters instead of
+        // relying on spatial focus search. Up from row 0 / Down from the last row fall
+        // through (return false) so focus can still leave the list normally.
+        modifier = modifier
+            .focusRestorer()
+            .onPreviewKeyEvent { e ->
+                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (e.key) {
+                    Key.DirectionDown -> {
+                        if (focusedIndex < 0 || focusedIndex >= tracks.size - 1) false
+                        else {
+                            focuserFor(focusedIndex + 1).requestFocus()
+                            true
+                        }
+                    }
+                    Key.DirectionUp -> {
+                        if (focusedIndex <= 0) false
+                        else {
+                            focuserFor(focusedIndex - 1).requestFocus()
+                            true
+                        }
+                    }
+                    else -> false
+                }
+            },
         verticalArrangement = Arrangement.spacedBy(6.dp),
         contentPadding = contentPadding,
     ) {
         itemsIndexed(tracks, key = { i, _ -> rowKeys[i] }) { index, track ->
-            // Two FocusRequesters can collide on the same row (row 0 == lastClicked). Compose
-            // doesn't error, but the later-applied one wins; layering them with .then() makes
-            // the priority explicit (lastClicked > firstFocus).
-            val rowModifier = when {
-                index == lastClickedIndex && index == 0 ->
-                    Modifier.focusRequester(lastClickedFocus).focusRequester(firstFocus)
-                index == lastClickedIndex -> Modifier.focusRequester(lastClickedFocus)
-                index == 0 -> Modifier.focusRequester(firstFocus)
-                else -> Modifier
-            }
+            // Exactly one FocusRequester per row, so initial-focus / click-restore never
+            // collide on the same row. onFocusChanged tracks which row holds focus — the
+            // explicit Up/Down handler above uses it to step row by row.
+            val rowModifier = Modifier
+                .focusRequester(focuserFor(index))
+                .onFocusChanged { if (it.isFocused) focusedIndex = index }
             TrackRow(
                 track = track,
                 index = index,

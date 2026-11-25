@@ -42,12 +42,15 @@ import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.di.getLanIp
 import com.walkman.tv.ui.appContainer
+import com.walkman.tv.ui.components.AlbumGroup
 import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.MediaCard
 import com.walkman.tv.ui.components.QrDialog
 import com.walkman.tv.ui.components.TrackList
+import com.walkman.tv.ui.components.TracksDetailOverlay
 import com.walkman.tv.ui.components.TvPill
+import com.walkman.tv.ui.components.groupAlbums
 import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
 import kotlinx.coroutines.async
@@ -146,6 +149,7 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                 loading = loading,
                 searched = searched,
                 songlists = songlists,
+                albums = remember(tracks) { groupAlbums(tracks) },
                 tracks = tracks,
                 hotColumns = hotColumns,
                 onOpenPlayer = onOpenPlayer,
@@ -258,6 +262,7 @@ private fun ResultsPane(
     loading: Boolean,
     searched: Boolean,
     songlists: List<SonglistInfo>,
+    albums: List<AlbumGroup>,
     tracks: List<Track>,
     hotColumns: List<com.walkman.tv.source.catalog.HotSearchColumn>,
     onOpenPlayer: () -> Unit,
@@ -266,6 +271,9 @@ private fun ResultsPane(
     onPickHot: (String) -> Unit = {},
 ) {
     val history by appContainer.searchHistoryStore.items.collectAsState()
+    // 打开的专辑详情（浮层盖在结果区上，点里面的歌直接播）。换一批搜索结果就关掉，别留着旧专辑。
+    var albumDetail by remember { mutableStateOf<AlbumGroup?>(null) }
+    LaunchedEffect(tracks) { albumDetail = null }
     when {
         loading -> LoadingState(Modifier.fillMaxSize())
         !searched -> {
@@ -284,7 +292,8 @@ private fun ResultsPane(
         }
         songlists.isEmpty() && tracks.isEmpty() ->
             EmptyHint("没有找到结果", Modifier.fillMaxSize())
-        else -> Column(modifier = Modifier.fillMaxSize()) {
+        else -> Box(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
             if (songlists.isNotEmpty()) {
                 SectionHeader("歌单 (${songlists.size})")
                 val uniqueSonglists = remember(songlists) { songlists.distinctBy { it.id + "_" + it.source.key } }
@@ -305,6 +314,25 @@ private fun ResultsPane(
                 }
                 Spacer(Modifier.padding(top = 8.dp))
             }
+            if (albums.isNotEmpty()) {
+                SectionHeader("专辑 (${albums.size})")
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                ) {
+                    items(albums, key = { "${it.source.key}_${it.name}" }) { album ->
+                        Box(modifier = Modifier.width(140.dp)) {
+                            MediaCard(
+                                title = album.name,
+                                picURL = album.picURL,
+                                subtitle = "${album.singer} · ${album.tracks.size} 首",
+                                onClick = { albumDetail = album },
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.padding(top = 8.dp))
+            }
             if (tracks.isNotEmpty()) {
                 SectionHeader("歌曲 (${tracks.size})")
                 val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
@@ -313,6 +341,16 @@ private fun ResultsPane(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     nowPlayingId = nowId,
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
+                )
+            }
+            }
+            albumDetail?.let { album ->
+                TracksDetailOverlay(
+                    title = album.name,
+                    subtitle = "${album.singer} · ${album.source.displayName} · ${album.tracks.size} 首",
+                    tracks = album.tracks,
+                    onBack = { albumDetail = null },
+                    onOpenPlayer = onOpenPlayer,
                 )
             }
         }
