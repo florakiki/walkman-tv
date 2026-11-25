@@ -214,6 +214,7 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 - 与上述任何音乐平台、洛雪音乐项目均无隶属或合作关系。
 
 ## 🍴 Fork 说明
+- 内置音源：首次启动自动导入包内自带的 Ki.js（lx-music v4 自定义源，含酷我/酷狗/QQ/网易云/咪咕），装好就能听，可在设置里停用或删除。
 
 本仓库是 [SincereXing/walkman-tv](https://github.com/SincereXing/walkman-tv) 的 fork（原项目 Apache 2.0，LICENSE 与原作者版权声明保留不变）。
 改动只做风格，不改功能与音源逻辑：

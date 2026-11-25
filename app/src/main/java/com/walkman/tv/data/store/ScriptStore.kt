@@ -22,11 +22,22 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
     private val _scripts = MutableStateFlow<List<UserScript>>(emptyList())
     val scripts: StateFlow<List<UserScript>> = _scripts.asStateFlow()
 
-    /** Load persisted scripts and start the enabled ones. First-run users start with no
-     *  custom source — they configure their own via Settings (URL / paste / file / QR upload). */
+    /** Load persisted scripts and start the enabled ones. On the very first launch
+     *  (no persisted scripts file yet) the bundled Ki.js is seeded as a built-in
+     *  source so the app plays out of the box; it can still be disabled / removed
+     *  in Settings like any imported source and is never re-seeded afterwards.
+     *  Users with an existing scripts file are untouched. */
     suspend fun loadAll() {
+        val scriptsFile = File(context.filesDir, "scripts.json")
         val list = withContext(Dispatchers.IO) { store.load() }
         _scripts.value = list
+        if (!scriptsFile.exists()) {
+            runCatching {
+                val raw = context.assets.open("script/Ki.js").bufferedReader().use { it.readText() }
+                import(raw)
+            }.onFailure { android.util.Log.w("ScriptStore", "bundled Ki.js seed failed", it) }
+            return
+        }
         list.filter { it.enabled }.forEach { sourceManager.load(it) }
     }
 
