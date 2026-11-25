@@ -214,9 +214,9 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
           )
-          // 播放调试信息（设置里开启）：获取地址 / 失败自动跳过 / 换源降级，排查音源问题用。
+          // 播放状态行：无条件显示 —— 播失败时用户要第一时间看到原因，而不是藏在调试开关后。
           val status = state.error ?: (if (state.resolving) "正在获取播放地址…" else state.warning)
-          if (settings.showDebugInfo && status != null) {
+          if (status != null) {
             Text(
               status,
               color = if (state.error != null) AppColors.Danger else AppColors.Warning,

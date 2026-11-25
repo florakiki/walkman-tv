@@ -116,6 +116,16 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit, modifier: Modifier = Modif
       val active = LyricParser.activeIndex(state.positionMs / 1000.0, lyrics)
       val line = lyrics.getOrNull(active)?.text ?: if (state.resolving) "解析中…" else ""
       Text(line, color = AppColors.LyricIdle, fontSize = 13.sp, maxLines = 1)
+      // 播放状态行（与播放页同一条）：无条件显示，推荐页播失败了也能看到原因。
+      val status = state.error ?: (if (state.resolving) "正在获取播放地址…" else state.warning)
+      if (status != null) {
+        Text(
+          status,
+          color = if (state.error != null) AppColors.Danger else AppColors.Warning,
+          fontSize = 12.sp,
+          maxLines = 1,
+        )
+      }
     } else {
       Text("暂无播放，去推荐里点歌开始吧", color = AppColors.TextSecondary, fontSize = 14.sp)
     }

@@ -114,11 +114,22 @@ class PlaybackController(
         _audioLevel.value = level
     }
 
+    /** Built-in gain (~+6 dB, soft-limited). Runs in the sink's processor chain after
+     *  [audioLevelProcessor]; toggled from settings, default on. */
+    private val gainProcessor = GainAudioProcessor()
+
+    /** Settings-driven switch for [gainProcessor]; wired in AppContainer.bootstrap. */
+    @Volatile var builtinGainEnabled: Boolean = true
+        set(value) {
+            field = value
+            gainProcessor.enabled = value
+        }
+
     /** 强制软件解码：只用系统自带的软件解码器（c2.android.* / OMX.google.*），绕开部分电视、盒子
      *  厂商硬件解码器的闪退或无声问题。解码器在每次准备新歌时挑选，所以切换后从下一首开始生效。 */
     @Volatile var forceSoftwareDecoding: Boolean = false
 
-    val player: ExoPlayer = buildPlayer(context.applicationContext, audioLevelProcessor, { forceSoftwareDecoding })
+    val player: ExoPlayer = buildPlayer(context.applicationContext, audioLevelProcessor, gainProcessor, { forceSoftwareDecoding })
 
     private val appContext = context.applicationContext
 
@@ -170,6 +181,7 @@ class PlaybackController(
         fun buildPlayer(
             appContext: android.content.Context,
             levelProcessor: AudioLevelProcessor,
+            gainProcessor: GainAudioProcessor,
             softwareOnly: () -> Boolean,
         ): ExoPlayer {
             val loadControl = DefaultLoadControl.Builder()
@@ -203,7 +215,9 @@ class PlaybackController(
                         .setEnableFloatOutput(enableFloatOutput)
                         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                         .setAudioProcessorChain(
-                            DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor),
+                            // Order matters: level meter first (measures pre-gain),
+                            // gain second (soft-limited +6 dB, see GainAudioProcessor).
+                            DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor, gainProcessor),
                         )
                         .build()
                 }
@@ -349,6 +363,11 @@ class PlaybackController(
     // MARK: - queue control
 
     fun setQueue(tracks: List<Track>, startIndex: Int = 0, autoPlay: Boolean = true) {
+        runCatching { setQueueInternal(tracks, startIndex, autoPlay) }
+            .onFailure { _state.value = _state.value.copy(error = "播放失败：${it.message}") }
+    }
+
+    private fun setQueueInternal(tracks: List<Track>, startIndex: Int = 0, autoPlay: Boolean = true) {
         if (tracks.isEmpty()) return
         consecutiveFailures = 0 // fresh user-initiated queue — start the failure streak over
         _state.value = _state.value.copy(queue = tracks, index = startIndex.coerceIn(0, tracks.size - 1))
@@ -427,6 +446,14 @@ class PlaybackController(
 
     private fun playResolvedOrFail(track: Track, resolved: Result<ResolvedTrack>) {
         resolved.onSuccess { r ->
+                // 脏地址兜底：解析器偶尔会吐出空地址或非音频 scheme（例如把报错页当成音频
+                // 文件）。直接交给 ExoPlayer 会撞死电视原生解码器（SIGSEGV，Kotlin 层抓不
+                // 住、无回调）。先拦下来，按失败处理自动跳下一首，不交给播放器。
+                val scheme = runCatching { android.net.Uri.parse(r.url).scheme?.lowercase() }.getOrNull()
+                if (r.url.isBlank() || scheme !in setOf("http", "https", "file", "content")) {
+                    failAndAdvance("播放地址无效")
+                    return@onSuccess
+                }
                 val item = MediaItem.Builder()
                     .setUri(r.url)
                     .setMediaMetadata(
@@ -538,6 +565,11 @@ class PlaybackController(
     }
 
     fun togglePlay() {
+        runCatching { togglePlayInternal() }
+            .onFailure { _state.value = _state.value.copy(error = "播放失败：${it.message}") }
+    }
+
+    private fun togglePlayInternal() {
         if (player.isPlaying) {
             player.pause()
             return
@@ -556,6 +588,11 @@ class PlaybackController(
     }
 
     fun next() {
+        runCatching { nextInternal() }
+            .onFailure { _state.value = _state.value.copy(error = "切换失败：${it.message}") }
+    }
+
+    private fun nextInternal() {
         val s = _state.value
         if (s.queue.isEmpty()) return
         val nextIdx = when {
@@ -568,6 +605,11 @@ class PlaybackController(
     }
 
     fun prev() {
+        runCatching { prevInternal() }
+            .onFailure { _state.value = _state.value.copy(error = "切换失败：${it.message}") }
+    }
+
+    private fun prevInternal() {
         val s = _state.value
         if (s.queue.isEmpty()) return
         if (player.currentPosition > 3000) { player.seekTo(0); return }

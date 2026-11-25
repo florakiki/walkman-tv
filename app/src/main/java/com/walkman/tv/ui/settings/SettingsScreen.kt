@@ -110,6 +110,32 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     // WRITE_EXTERNAL_STORAGE on API ≤ 29, or All-files access on 30+.
     var showDownloadBrowser by remember { mutableStateOf(false) }
     var dlPermHint by remember { mutableStateOf(false) }
+
+    // System file picker (SAF) for a playlist-backup JSON produced by 「备份歌单」.
+    val backupPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                status = "正在读取备份…"
+                val raw = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.use {
+                            it.readBytes().toString(Charsets.UTF_8)
+                        }
+                    }.getOrNull()
+                }
+                if (raw.isNullOrEmpty()) {
+                    status = "读取备份失败"
+                } else {
+                    status = "正在恢复歌单…"
+                    val r = appContainer.libraryStore.importBackupJson(raw)
+                    status = r.fold(
+                        { "已恢复 $it 个歌单（我喜欢的、播放历史、自建列表）" },
+                        { "恢复失败：${it.message}" },
+                    )
+                }
+            }
+        }
+    }
     val dlPermLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted -> if (granted) showDownloadBrowser = true else dlPermHint = true }
@@ -225,6 +251,18 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             ToggleRow("强制软件解码（播放闪退或没声音时请开启，下一首起生效）", settings.forceSoftwareDecoding) {
                 scope.launch { appContainer.settingsStore.update { it.copy(forceSoftwareDecoding = !it.forceSoftwareDecoding) } }
             }
+        }
+
+        Section("内置音量") {
+            ToggleRow("内置增益（声音偏小时开启，约 +6dB）", settings.builtinGainEnabled) {
+                scope.launch { appContainer.settingsStore.update { it.copy(builtinGainEnabled = !it.builtinGainEnabled) } }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "在 App 内把音量再放大一级（约 +6dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
+                color = AppColors.TextMuted,
+                fontSize = 11.sp,
+            )
         }
 
         Section("歌词翻译") {
@@ -376,6 +414,52 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )
+        }
+
+        Section("歌单备份") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TvPill(
+                    onClick = {
+                        scope.launch {
+                            status = "正在导出…"
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val json = appContainer.libraryStore.exportBackupJson()
+                                    val stamp = java.text.SimpleDateFormat(
+                                        "yyyyMMdd-HHmmss", java.util.Locale.US,
+                                    ).format(java.util.Date())
+                                    val file = java.io.File(
+                                        appContainer.downloadStore.downloadRoot,
+                                        "kitv-music-backup-$stamp.json",
+                                    )
+                                    file.writeText(json)
+                                    file.absolutePath
+                                }
+                            }
+                            status = result.fold(
+                                { "备份已导出：$it" },
+                                { "导出失败：${it.message}" },
+                            )
+                        }
+                    },
+                    selected = true,
+                ) { Text("备份歌单", fontSize = 14.sp) }
+                TvPill(
+                    onClick = {
+                        runCatching {
+                            backupPicker.launch(arrayOf("application/json", "text/plain", "*/*"))
+                        }.onFailure { status = "未找到可用的文件选择器" }
+                    },
+                    selected = true,
+                ) { Text("恢复歌单", fontSize = 14.sp) }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "备份：把「我喜欢的」、播放历史和自建歌单导出成一个 JSON 文件，存在下载目录；换电视、重装后用「恢复歌单」选那个文件导回来。",
+                color = AppColors.TextMuted,
+                fontSize = 11.sp,
+            )
+            status?.let { Text(it, color = AppColors.TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
         }
 
         Section("自定义音源") {

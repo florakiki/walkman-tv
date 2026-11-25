@@ -2,7 +2,7 @@
 
     <!-- Base theme — platform Material, no ActionBar (Compose draws everything). -->
     <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/bg_deep</item>
+        <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:colorBackground">@color/bg_deep</item>
         <item name="android:statusBarColor">@color/bg_deep</item>
         <item name="android:navigationBarColor">@color/bg_deep</item>

@@ -37,9 +37,14 @@ data class Settings(
     val fallbackEnabled: Boolean = true,
     /** Audio offload (DSP direct path / HDMI passthrough). Bit-perfect Hi-Res on good HALs,
      *  but some vendor HALs (小米/鸿蒙/坚果 etc.) crash natively in the offload path — the
-     *  settings toggle lets affected users turn it off. Default on so existing users keep
-     *  the current behaviour. */
-    val audioOffloadEnabled: Boolean = true,
+     *  settings toggle lets affected users turn it off. Default OFF: a native crash in the
+     *  offload path kills the whole process with no callback, so the safe default is the
+     *  normal PCM path (offload can still be switched on in settings). Only affects fresh
+     *  installs — existing users keep whatever value they already stored. */
+    val audioOffloadEnabled: Boolean = false,
+    /** 内置增益：App 内把音量再放大一级（约 +6dB，带防破音软限幅），不改电视系统音量。
+     *  默认开启；硬件直通开启时 PCM 处理链被绕过，增益不生效。见 GainAudioProcessor。 */
+    val builtinGainEnabled: Boolean = true,
     /** 强制软件解码（音频）。部分电视、盒子的硬件解码器会闪退或没声音，开启后只用系统软件解码器，
      *  同时关闭硬件直通。默认关闭。 */
     val forceSoftwareDecoding: Boolean = false,

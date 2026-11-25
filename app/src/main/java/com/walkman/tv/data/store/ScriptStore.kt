@@ -26,16 +26,33 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
      *  (no persisted scripts file yet) the bundled Ki.js is seeded as a built-in
      *  source so the app plays out of the box; it can still be disabled / removed
      *  in Settings like any imported source and is never re-seeded afterwards.
-     *  Users with an existing scripts file are untouched. */
+     *  Users with an existing scripts file are untouched.
+     *
+     *  Debug-only: the bundled source lives in src/debug/assets and is seeded only
+     *  on debuggable (debug) builds — release builds ship no
+     *  source and never auto-import; release users import sources manually.
+     *  The bundled file is KITV-AES encrypted (see [KitvAes]); it is decrypted in
+     *  memory here and the plaintext is never written back to disk. */
     suspend fun loadAll() {
         val scriptsFile = File(context.filesDir, "scripts.json")
         val list = withContext(Dispatchers.IO) { store.load() }
         _scripts.value = list
         if (!scriptsFile.exists()) {
-            runCatching {
-                val raw = context.assets.open("script/Ki.js").bufferedReader().use { it.readText() }
-                import(raw)
-            }.onFailure { android.util.Log.w("ScriptStore", "bundled Ki.js seed failed", it) }
+            // 内置源只进 debug 测试版：Ki.js 在 src/debug/assets 下，release 包里没有这个
+            // 文件；这里再用 debuggable 门住（debug 版默认 debuggable，release 不是），
+            // release 即使有残留也不会自动导入。正式版用户自己手动导源
+            // （import() 不受影响，明文源照常能导）。不用 BuildConfig：本项目没开
+            // buildConfig 生成（见 UpdateManager 的注释）。
+            val debuggable = (context.applicationInfo.flags and
+                android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            if (debuggable) {
+                runCatching {
+                    val raw = context.assets.open("script/Ki.js").bufferedReader().use { it.readText() }
+                    // 加密版（KITV-AES: 开头）在内存里解出来再导入；明文按原样走。解密后的
+                    // 明文只留在内存，不写回磁盘。
+                    import(KitvAes.decryptIfPrefixed(raw))
+                }.onFailure { android.util.Log.w("ScriptStore", "bundled Ki.js seed failed", it) }
+            }
             return
         }
         list.filter { it.enabled }.forEach { sourceManager.load(it) }

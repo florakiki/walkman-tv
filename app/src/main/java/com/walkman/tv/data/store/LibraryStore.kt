@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import java.io.File
 
 @Serializable
@@ -139,6 +140,28 @@ class LibraryStore(context: Context) {
             if (it.id == listId) it.copy(tracks = it.tracks.filter { t -> t.id != trackId }) else it
         }
         persist()
+    }
+
+    /** 歌单备份导出：把「我喜欢的」/ 播放历史 / 自建歌单序列化成一个 JSON（与 library.json
+     *  同格式），供设置页写到下载目录。换电视、重装后凭此文件恢复。 */
+    fun exportBackupJson(): String {
+        val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        return json.encodeToString(
+            LibraryData.serializer(),
+            LibraryData(_love.value, _history.value, _userLists.value),
+        )
+    }
+
+    /** 从备份 JSON 恢复歌单：收藏 / 历史 / 自建列表整体替换。格式不对返回失败。
+     *  成功返回恢复的列表数（收藏 + 历史 + 自建列表数）。 */
+    suspend fun importBackupJson(raw: String): Result<Int> = runCatching {
+        val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val data = json.decodeFromString(LibraryData.serializer(), raw)
+        _love.value = data.love.copy(name = Playlist.LOVE_NAME)
+        _history.value = data.history.copy(name = Playlist.HISTORY_NAME)
+        _userLists.value = data.userLists
+        persist()
+        2 + data.userLists.size
     }
 
     private suspend fun persist() = withContext(Dispatchers.IO) {

@@ -141,22 +141,86 @@ class AppContainer(val appContext: Context) {
             // Local-first URL resolver — downloads + SAF imports skip the online cascade.
             // Doubles as the play-time file check: if a COMPLETED download's file is gone we
             // flag it missing (badge disappears, 已下载 tab shows 文件缺失) and fall through to
-            // the online cascade; if it's there we clear any stale missing flag.
+            // the online cascade; if it's there we clear any stale missing flag. The file also
+            // gets a size/header sanity check first — a 0-byte or HTML-error-page file must
+            // never reach the native decoder (SIGSEGV, uncatchable); it falls through to the
+            // online cascade instead.
             playbackController.localUrlResolver = { track ->
                 // Resolves both File downloads and SAF-exported downloads to a playable Uri.
                 val playable = downloadStore.localPlayableUri(track.id)
                 when {
-                    playable != null -> {
+                    playable != null && isSaneLocalAudio(playable) -> {
                         downloadStore.markPresent(track.id)
                         playable
                     }
                     else -> {
                         if (downloadStore.isDownloaded(track.id)) downloadStore.markMissing(track.id)
-                        localMusicStore.fileUri(track)?.toString()
+                        localMusicStore.fileUri(track)?.toString()?.takeIf { isSaneLocalAudio(it) }
                     }
                 }
             }
         }
+    }
+
+    /** Play-time sanity check for a local audio file (file:// or content://). Returns false
+     *  for a 0-byte file, an unreadable file, or a file whose header is an error page / text
+     *  instead of audio — those must fall back to the online cascade, never to the decoder.
+     *  Unknown *binary* headers are allowed through so exotic-but-valid codecs aren't
+     *  false-rejected; only known-bad (HTML/JSON/text) is blocked. */
+    private fun isSaneLocalAudio(uriString: String): Boolean {
+        val uri = runCatching { android.net.Uri.parse(uriString) }.getOrNull() ?: return false
+        val header: ByteArray? = when (uri.scheme?.lowercase()) {
+            "file" -> runCatching {
+                val f = java.io.File(uri.path ?: return false)
+                if (!f.isFile || f.length() == 0L) return false
+                f.inputStream().use { readHeader(it) }
+            }.getOrNull()
+            "content" -> runCatching {
+                appContext.contentResolver.openInputStream(uri)?.use { readHeader(it) }
+            }.getOrNull()
+            else -> return false
+        }
+        if (header == null || header.isEmpty()) return false
+        return isAudioHeader(header)
+    }
+
+    /** Read up to 16 leading bytes (manual loop — InputStream.readNBytes needs API 33). */
+    private fun readHeader(input: java.io.InputStream): ByteArray? {
+        val buf = ByteArray(16)
+        var read = 0
+        while (read < buf.size) {
+            val n = input.read(buf, read, buf.size - read)
+            if (n < 0) break
+            read += n
+        }
+        return if (read == 0) null else buf.copyOf(read)
+    }
+
+    private fun isAudioHeader(h: ByteArray): Boolean {
+        fun ascii(off: Int, s: String): Boolean {
+            if (h.size < off + s.length) return false
+            return s.indices.all { h[off + it] == s[it].code.toByte() }
+        }
+        // Error pages / text are never audio.
+        if (h[0] == '<'.code.toByte() || h[0] == '{'.code.toByte() || h[0] == '['.code.toByte()) return false
+        // Known audio magic: ID3/FLAC/Ogg/RIFF-WAVE/AIFF/APE/WavPack/DSF, MP4 ftyp.
+        if (ascii(0, "ID3") || ascii(0, "fLaC") || ascii(0, "OggS") || ascii(0, "RIFF") ||
+            ascii(0, "FORM") || ascii(0, "MAC ") || ascii(0, "wvpk") || ascii(0, "DSD ") ||
+            ascii(4, "ftyp") || ascii(8, "WAVE")
+        ) return true
+        // MP3 / AAC-ADTS frame sync (11 leading 1-bits).
+        if (h.size >= 2 && h[0] == 0xFF.toByte() && (h[1].toInt() and 0xE0) == 0xE0) return true
+        // ASF / WMA GUID.
+        if (h.size >= 4 && h[0] == 0x30.toByte() && h[1] == 0x26.toByte() &&
+            h[2] == 0xB2.toByte() && h[3] == 0x75.toByte()
+        ) return true
+        // Unknown binary: allow (don't false-reject exotic codecs). Pure printable ASCII
+        // text: treat as an error page and block.
+        val printableAscii = h.all {
+            val v = it.toInt() and 0xFF
+            v in 0x09..0x0D || v in 0x20..0x7E
+        }
+        return !printableAscii
     }
 
     // Hot-search JSON cache for the phone page (/api/hotsearch). Fetched at most once per 5 min;
@@ -224,6 +288,7 @@ class AppContainer(val appContext: Context) {
             libraryStore.loadAll()
             settingsStore.settings.onEach { s ->
                 playbackController.preferredQuality = s.preferredQuality
+                playbackController.builtinGainEnabled = s.builtinGainEnabled
                 // 硬件直通会把未解码的数据直接交给音频硬件，绕过解码器；强制软解时一并关掉。
                 playbackController.setAudioOffloadEnabled(s.audioOffloadEnabled && !s.forceSoftwareDecoding)
                 playbackController.forceSoftwareDecoding = s.forceSoftwareDecoding
