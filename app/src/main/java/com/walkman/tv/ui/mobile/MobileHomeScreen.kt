@@ -3,9 +3,11 @@ package com.walkman.tv.ui.mobile
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -45,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -77,9 +80,18 @@ fun MobileHomeScreen(
     val history by appContainer.libraryStore.history.collectAsState()
     var tab by remember { mutableStateOf(0) }
     val tabs = listOf("推荐", "歌单", "排行榜")
+    // 歌手入口：首页“歌手”区只放前 10 个热门歌手头像，点“查看全部”进歌手浏览页。
+    var hotSingers by remember { mutableStateOf<List<com.walkman.tv.source.catalog.ArtistInfo>>(emptyList()) }
+    var showSingers by remember { mutableStateOf(false) }
+    var openArtist by remember { mutableStateOf<com.walkman.tv.source.catalog.ArtistInfo?>(null) }
+    var openAlbumInfo by remember { mutableStateOf<com.walkman.tv.source.catalog.AlbumInfo?>(null) }
+    val playingId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
 
     LaunchedEffect(settings.homeSources) {
         appContainer.homeStore.loadIfNeeded(settings.homeSources)
+    }
+    LaunchedEffect(Unit) {
+        hotSingers = runCatching { appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 10) }.getOrDefault(emptyList())
     }
 
     BoxWithConstraints(modifier.fillMaxSize()) {
@@ -178,6 +190,43 @@ fun MobileHomeScreen(
                         Spacer(Modifier.height(12.dp))
                     }
                 }
+                // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
+                if (hotSingers.isNotEmpty()) {
+                    item {
+                        Spacer(Modifier.height(8.dp))
+                        SectionHeader("歌手") { showSingers = true }
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    item {
+                        androidx.compose.foundation.lazy.LazyRow(
+                            horizontalArrangement = Arrangement.spacedBy(16.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp),
+                        ) {
+                            items(hotSingers, key = { "${it.source.key}_${it.id}" }) { artist ->
+                                Column(
+                                    modifier = Modifier.clickable { openArtist = artist },
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    CoverImage(
+                                        artist.picURL,
+                                        modifier = Modifier.size(64.dp).clip(CircleShape),
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        artist.name,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = AppColors.TextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.width(64.dp),
+                                        textAlign = TextAlign.Center,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 item {
                     Spacer(Modifier.height(8.dp))
                     SectionHeader("为你推荐", actionLabel = null) {}
@@ -225,13 +274,36 @@ fun MobileHomeScreen(
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(board.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(board.source.displayName, fontSize = 12.sp, color = AppColors.TextSecondary)
                         }
                     }
                 }
             }
         }
         item { Spacer(Modifier.height(96.dp)) }
+        }
+        // 歌手浏览页（地区 tab + 头像网格）与歌手页、专辑详情，盖在首页内容上。
+        if (showSingers) {
+            SingerBrowseView(
+                onBack = { showSingers = false },
+                onOpenArtist = { openArtist = it },
+            )
+        }
+        openArtist?.let { artist ->
+            ArtistDetailView(
+                artist = artist,
+                playingId = playingId,
+                onBack = { openArtist = null },
+                onOpenPlayer = onOpenPlayer,
+                onOpenAlbum = { openAlbumInfo = it },
+            )
+        }
+        openAlbumInfo?.let { info ->
+            AlbumDetailView(
+                info = info,
+                playingId = playingId,
+                onBack = { openAlbumInfo = null },
+                onOpenPlayer = onOpenPlayer,
+            )
         }
     }
 }

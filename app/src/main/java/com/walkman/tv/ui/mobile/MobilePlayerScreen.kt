@@ -1,10 +1,13 @@
 package com.walkman.tv.ui.mobile
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -75,6 +78,9 @@ fun MobilePlayerScreen(
     val scope = rememberCoroutineScope()
     var showQueue by remember { mutableStateOf(false) }
     var sliderFraction by remember { mutableStateOf<Float?>(null) }
+    // 点一下封面/歌词区隐藏底部控制栏（进度条 + 控制键 + 收藏行），再点一下显示回来。
+    // 底部这一栏本来就没有实底面板，是透明底，不用改颜色。
+    var controlsVisible by remember { mutableStateOf(true) }
 
     val track = state.currentTrack
     val isFavorite = track?.let { appContainer.libraryStore.isFavorite(it.id) } ?: false
@@ -115,11 +121,15 @@ fun MobilePlayerScreen(
         }
 
         Spacer(Modifier.height(12.dp))
-        // 大圆黑胶：黑底 + 纹路圈 + 中间封面，播的时候转。
+        // 大圆黑胶：黑底 + 纹路圈 + 中间封面，播的时候转。点一下切换底部控制栏显示/隐藏。
         Box(
             modifier = Modifier
                 .size(280.dp)
-                .graphicsLayer { rotationZ = rotation.value },
+                .graphicsLayer { rotationZ = rotation.value }
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                ) { controlsVisible = !controlsVisible },
             contentAlignment = Alignment.Center,
         ) {
             Box(
@@ -169,8 +179,13 @@ fun MobilePlayerScreen(
         )
 
         Spacer(Modifier.height(12.dp))
-        // 歌词：当前行深绿加粗，其它行灰色；没歌词时给一句提示。
-        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+        // 歌词：当前行深绿加粗，其它行灰色；没歌词时给一句提示。点一下切换底部控制栏显示/隐藏。
+        Box(
+            modifier = Modifier.fillMaxWidth().weight(1f).clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+            ) { controlsVisible = !controlsVisible },
+        ) {
             if (lyrics.isEmpty()) {
                 if (state.resolving) {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -207,6 +222,9 @@ fun MobilePlayerScreen(
             }
         }
 
+        // 进度 + 控制键 + 收藏行：点封面/歌词区可以隐藏，再点显示回来（透明底不变）。
+        AnimatedVisibility(visible = controlsVisible) {
+            Column {
         // 进度
         val duration = state.durationMs
         val fraction = if (duration > 0) (state.positionMs.toFloat() / duration).coerceIn(0f, 1f) else 0f
@@ -299,6 +317,8 @@ fun MobilePlayerScreen(
                     fontSize = 12.sp,
                     color = if (state.error != null) AppColors.Danger else AppColors.Warning,
                 )
+            }
+        }
             }
         }
     }

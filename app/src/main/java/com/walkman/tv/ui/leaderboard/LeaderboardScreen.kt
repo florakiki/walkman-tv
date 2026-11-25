@@ -25,7 +25,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import com.walkman.tv.data.model.BoardInfo
-import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.fetchOr
@@ -33,15 +32,12 @@ import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.TrackList
 import com.walkman.tv.ui.components.TvFocusable
-import com.walkman.tv.ui.components.TvPill
 import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
 
-private val boardSources = listOf(SourceID.KW, SourceID.WY, SourceID.KG, SourceID.TX)
-
 @Composable
 fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
-    var source by remember { mutableStateOf(SourceID.KW) }
+    // 不显示平台来源：四个平台的榜单合并成一份列表，源的选择在后台（按榜拉歌时按榜所属平台取）。
     var boards by remember { mutableStateOf<List<BoardInfo>>(emptyList()) }
     var selected by remember { mutableStateOf<BoardInfo?>(null) }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
@@ -50,34 +46,43 @@ fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     // 切榜慢的原因：每次换平台/换榜都重新拉网（榜单列表、榜单歌曲都是现调接口，一次
     // 1-3 秒），没有任何缓存。榜单内容几分钟内不会变，缓存起来：有缓存先直接显示，
     // 后台再悄悄拉一遍新的，内容真变了才更新，回来还是这张榜就不用再转圈。
-    val boardsCache = remember { mutableStateMapOf<SourceID, List<BoardInfo>>() }
+    val boardsCache = remember { mutableStateOf<List<BoardInfo>?>(null) }
     val tracksCache = remember { mutableStateMapOf<String, List<Track>>() }
-    // 每个平台上次选中的榜，切换平台再回来还停在原来那张榜上。
-    val lastSelectedBySource = remember { mutableStateMapOf<SourceID, String>() }
+    // 上次选中的榜，重进还停在原来那张榜上。
+    var lastSelectedId by remember { mutableStateOf<String?>(null) }
 
     // fetchOr (not runCatching): a cancelled effect must die at the fetch, not swallow the
     // CancellationException and stomp state its restarted replacement already wrote.
-    LaunchedEffect(source) {
-        val cached = boardsCache[source]
+    // 四个平台的榜单合并：逐个拉榜单列表，拼起来去重（按榜 id）。
+    suspend fun fetchAllBoards(): List<BoardInfo> {
+        val all = mutableListOf<BoardInfo>()
+        for (svc in appContainer.boards.servicesAll()) {
+            all += fetchOr(emptyList()) { svc.fetchBoards() }
+        }
+        return all.distinctBy { it.id }
+    }
+
+    LaunchedEffect(Unit) {
+        val cached = boardsCache.value
         if (cached != null) {
             boards = cached
-            selected = cached.firstOrNull { it.id == lastSelectedBySource[source] }
+            selected = cached.firstOrNull { it.id == lastSelectedId }
                 ?: cached.firstOrNull()
-            // 后台刷新：榜单名字/封面可能变，回来还是这个平台、内容真变了才更新。
-            val fresh = fetchOr(emptyList()) { appContainer.boards.serviceFor(source)?.fetchBoards() ?: emptyList() }
+            // 后台刷新：榜单名字/封面可能变，内容真变了才更新。
+            val fresh = fetchAllBoards()
             if (fresh.isNotEmpty() && fresh != cached) {
-                boardsCache[source] = fresh
+                boardsCache.value = fresh
                 boards = fresh
                 val selId = selected?.id
                 if (selId == null || fresh.none { it.id == selId }) {
-                    selected = fresh.firstOrNull { it.id == lastSelectedBySource[source] }
+                    selected = fresh.firstOrNull { it.id == lastSelectedId }
                         ?: fresh.firstOrNull()
                 }
             }
         } else {
-            boards = fetchOr(emptyList()) { appContainer.boards.serviceFor(source)?.fetchBoards() ?: emptyList() }
-            if (boards.isNotEmpty()) boardsCache[source] = boards
-            selected = boards.firstOrNull { it.id == lastSelectedBySource[source] }
+            boards = fetchAllBoards()
+            if (boards.isNotEmpty()) boardsCache.value = boards
+            selected = boards.firstOrNull { it.id == lastSelectedId }
                 ?: boards.firstOrNull()
         }
     }
@@ -104,26 +109,11 @@ fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
 
     Row(modifier = modifier.fillMaxSize().padding(top = 8.dp)) {
         Column(modifier = Modifier.width(150.dp).fillMaxHeight()) {
-            // Wrap to 2x2 — 4 platform chips can't fit horizontally in a 150dp column
-            // (QQ音乐 alone is ~52dp; the row total ~175dp would clip the last chip).
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                boardSources.chunked(2).forEach { rowChips ->
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        rowChips.forEach { s ->
-                            TvPill(
-                                onClick = { source = s },
-                                selected = source == s,
-                                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 6.dp),
-                            ) { Text(s.displayName, fontSize = 11.sp) }
-                        }
-                    }
-                }
-            }
             Spacer(Modifier.padding(top = 6.dp))
             val uniqueBoards = remember(boards) { boards.distinctBy { it.id } }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(uniqueBoards, key = { it.id }) { b ->
-                    TvFocusable(onClick = { selected = b; lastSelectedBySource[b.source] = b.id }, modifier = Modifier.fillMaxWidth()) {
+                    TvFocusable(onClick = { selected = b; lastSelectedId = b.id }, modifier = Modifier.fillMaxWidth()) {
                         Text(
                             b.name,
                             color = if (selected?.id == b.id) AppColors.AccentGreen else AppColors.TextPrimary,

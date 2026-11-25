@@ -27,7 +27,7 @@ class BuiltInResolver(client: OkHttpClient) {
         when (track.source) {
             SourceID.KW -> resolveKuwo(track.songmid, quality)
             SourceID.WY -> ResolvedURL(resolveNetEase(track.songmid))
-            else -> throw ResolveException("内置直连暂不支持 ${track.source.displayName}")
+            else -> throw ResolveException("内置直连暂不支持这个源")
         }
     }
 

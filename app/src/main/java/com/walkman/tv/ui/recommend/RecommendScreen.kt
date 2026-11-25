@@ -4,6 +4,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items as gridItems
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
@@ -212,6 +217,7 @@ private fun CircleControl(icon: androidx.compose.ui.graphics.vector.ImageVector,
 
 private data class DetailView(val title: String, val subtitle: String?, val tracks: List<com.walkman.tv.data.model.Track>)
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun RecommendGrid(
   onNavigate: (NavSection) -> Unit,
@@ -223,12 +229,25 @@ private fun RecommendGrid(
   val scope = androidx.compose.runtime.rememberCoroutineScope()
   var detail by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<DetailView?>(null) }
   var loadingDetail by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+  // 歌手浏览页（地区 tab + 圆形头像网格）与歌手页浮层的状态。
+  var browseSingers by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+  var openArtist by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<com.walkman.tv.source.catalog.ArtistInfo?>(null) }
+  var hotSingers by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<com.walkman.tv.source.catalog.ArtistInfo>>(emptyList()) }
+  // 首页“歌手”区只放前 12 个热门歌手预览，点“查看全部”进浏览页再按地区拉。
+  androidx.compose.runtime.LaunchedEffect(Unit) {
+    hotSingers = runCatching {
+      appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 12)
+    }.getOrDefault(emptyList())
+  }
+  // 首页打开时焦点落在第一张卡片上（以前是落在轮播横幅上）。
+  val firstCardFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+  androidx.compose.runtime.LaunchedEffect(Unit) {
+    runCatching { firstCardFocus.requestFocus() }
+  }
 
   androidx.compose.runtime.LaunchedEffect(settings.homeSources) {
     appContainer.homeStore.loadIfNeeded(settings.homeSources)
   }
-
-  val activeLabel = home.sources.joinToString(" · ") { it.displayName }
 
   fun openSonglist(info: com.walkman.tv.data.model.SonglistInfo) {
     if (loadingDetail) return
@@ -238,7 +257,7 @@ private fun RecommendGrid(
       val d = runCatching { svc?.fetchDetail(info) }.getOrNull()
       detail = DetailView(
         title = info.name,
-        subtitle = info.author.takeIf { it.isNotBlank() } ?: info.source.displayName,
+        subtitle = info.author.takeIf { it.isNotBlank() },
         tracks = d?.tracks ?: emptyList(),
       )
       loadingDetail = false
@@ -253,7 +272,7 @@ private fun RecommendGrid(
       val tracks = runCatching { svc?.fetchTracks(board.bangid, 1) ?: emptyList() }.getOrDefault(emptyList())
       detail = DetailView(
         title = board.name,
-        subtitle = board.source.displayName,
+        subtitle = null,
         tracks = tracks,
       )
       loadingDetail = false
@@ -261,44 +280,78 @@ private fun RecommendGrid(
   }
 
   Box(modifier = modifier) {
-    androidx.compose.foundation.lazy.LazyColumn(
+    LazyVerticalGrid(
+      columns = GridCells.Adaptive(minSize = 180.dp),
       modifier = Modifier.fillMaxSize().focusGroup(),
       contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),
+      horizontalArrangement = Arrangement.spacedBy(14.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
       when {
-        settings.homeSources.isEmpty() -> item { NoSourcesHint(onNavigate) }
-        home.isLoading && home.heroes.isEmpty() -> item { LoadingPlaceholder() }
+        settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
+        home.isLoading && home.heroes.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
         else -> {
-          if (home.heroes.isNotEmpty()) {
-            item {
-              HeroCarousel(
-                heroes = home.heroes,
-                onSelect = { hero -> openSonglist(hero.songlist) },
-              )
-            }
-          }
-          if (home.recommendations.isNotEmpty()) {
-            item {
-              SectionHeader("推荐歌单", activeLabel, trailing = "查看全部") {
+          // 推荐歌单：每平台的第一张（heroes）+ 其余推荐，全部摊平成卡片网格，能往下滚。
+          val songlists = home.heroes.map { it.songlist } + home.recommendations
+          if (songlists.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              SectionHeader("推荐歌单", null, trailing = "查看全部") {
                 onNavigate(NavSection.Songlist)
               }
             }
-            item {
-              SonglistRow(home.recommendations) { info -> openSonglist(info) }
+            gridItemsIndexed(
+              songlists.distinctBy { "${it.source.key}_${it.id}" },
+              key = { _, info -> "${info.source.key}_${info.id}" },
+            ) { index, info ->
+              GridAlbumCard(
+                picURL = info.picURL,
+                title = info.name,
+                subtitle = info.playCount?.let { "▶ $it" },
+                fallbackTint = info.source.tintColor(),
+                focusRequester = if (index == 0) firstCardFocus else null,
+                onClick = { openSonglist(info) },
+              )
             }
           }
           if (home.boards.isNotEmpty()) {
-            item {
-              SectionHeader("排行榜", activeLabel, trailing = "查看全部") {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              SectionHeader("排行榜", null, trailing = "查看全部") {
                 onNavigate(NavSection.Leaderboard)
               }
             }
-            item {
-              BoardRow(home.boards) { board -> openBoard(board) }
+            gridItems(
+              home.boards.distinctBy { "${it.source.key}_${it.id}" },
+              key = { "${it.source.key}_${it.id}" },
+            ) { board ->
+              GridAlbumCard(
+                picURL = board.picURL,
+                title = board.name,
+                subtitle = null,
+                fallbackTint = board.source.tintColor(),
+                onClick = { openBoard(board) },
+              )
             }
           }
-          item { StatsRow(onNavigate) }
+          // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
+          if (hotSingers.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              SectionHeader("歌手", null, trailing = "查看全部") {
+                browseSingers = true
+              }
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              androidx.compose.foundation.lazy.LazyRow(
+                modifier = Modifier.focusRestorer(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+              ) {
+                items(hotSingers, key = { "${it.source.key}_${it.id}" }) { artist ->
+                  com.walkman.tv.ui.search.ArtistCard(artist = artist, onClick = { openArtist = artist })
+                }
+              }
+            }
+          }
+          item(span = { GridItemSpan(maxLineSpan) }) { StatsRow(onNavigate) }
         }
       }
     }
@@ -309,6 +362,19 @@ private fun RecommendGrid(
         subtitle = d.subtitle,
         tracks = d.tracks,
         onBack = { detail = null },
+        onOpenPlayer = onOpenPlayer,
+      )
+    }
+    if (browseSingers) {
+      SingerBrowseOverlay(
+        onBack = { browseSingers = false },
+        onOpenArtist = { openArtist = it },
+      )
+    }
+    openArtist?.let { artist ->
+      com.walkman.tv.ui.search.ArtistDetailOverlay(
+        artist = artist,
+        onBack = { openArtist = null },
         onOpenPlayer = onOpenPlayer,
       )
     }
@@ -410,271 +476,6 @@ private fun SectionHeader(
 }
 
 @Composable
-private fun HeroCarousel(heroes: List<HeroItem>, onSelect: (HeroItem) -> Unit) {
-  var index by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(0) }
-  var hasFocus by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-  val bannerFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
-
-  androidx.compose.runtime.LaunchedEffect(Unit) {
-    runCatching { bannerFocus.requestFocus() }
-  }
-
-  androidx.compose.runtime.LaunchedEffect(heroes.size, index, hasFocus) {
-    if (heroes.size > 1 && !hasFocus) {
-      kotlinx.coroutines.delay(6_000)
-      index = (index + 1) % heroes.size
-    }
-  }
-  val current = heroes.getOrNull(index) ?: return
-
-  Column(
-    modifier = Modifier
-      .fillMaxWidth()
-      .onFocusChanged { hasFocus = it.hasFocus },
-    verticalArrangement = Arrangement.spacedBy(10.dp),
-  ) {
-    HeroBanner(
-      item = current,
-      focusRequester = bannerFocus,
-      onClick = { onSelect(current) },
-      // Left / Right on the focused banner flips slides (#19). Left on the first slide falls
-      // through so the user can still reach the nav rail.
-      modifier = Modifier.onPreviewKeyEvent { e ->
-        if (heroes.size < 2 || e.type != androidx.compose.ui.input.key.KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        when (e.key) {
-          androidx.compose.ui.input.key.Key.DirectionRight -> { index = (index + 1) % heroes.size; true }
-          androidx.compose.ui.input.key.Key.DirectionLeft -> if (index > 0) { index -= 1; true } else false
-          else -> false
-        }
-      },
-    )
-    if (heroes.size > 1) {
-      Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-      ) {
-        heroes.forEachIndexed { i, _ ->
-          val active = i == index
-          TvFocusable(
-            onClick = { index = i },
-            shape = RoundedCornerShape(50),
-          ) {
-            Box(
-              modifier = Modifier
-                .width(if (active) 28.dp else 12.dp)
-                .height(8.dp)
-                .clip(RoundedCornerShape(50))
-                .background(
-                  if (active) AppColors.BrandPrimary
-                  else AppColors.TextMuted.copy(alpha = 0.5f),
-                ),
-            )
-          }
-        }
-      }
-    }
-  }
-}
-
-@Composable
-private fun HeroBanner(
-  item: HeroItem,
-  focusRequester: androidx.compose.ui.focus.FocusRequester,
-  onClick: () -> Unit,
-  modifier: Modifier = Modifier,
-) {
-  val tint = item.source.tintColor()
-  val accentEnd = tint.copy(alpha = 0.65f)
-  TvFocusable(
-    onClick = onClick,
-    modifier = modifier
-      .fillMaxWidth()
-      .height(260.dp)
-      .focusRequester(focusRequester),
-    shape = RoundedCornerShape(20.dp),
-  ) {
-    Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(20.dp))) {
-      Box(
-        modifier = Modifier.fillMaxSize().background(
-          Brush.linearGradient(
-            colors = listOf(tint, accentEnd, Color.Black.copy(alpha = 0.85f)),
-          ),
-        ),
-      )
-      item.songlist.picURL?.let {
-        AsyncImage(
-          model = it,
-          contentDescription = null,
-          modifier = Modifier.fillMaxSize().alpha(0.18f),
-          contentScale = ContentScale.Crop,
-        )
-      }
-      Row(
-        modifier = Modifier.fillMaxSize().padding(horizontal = 28.dp, vertical = 22.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        Column(modifier = Modifier.weight(1f)) {
-          Text(
-            item.songlist.name,
-            color = Color.White,
-            fontSize = 30.sp,
-            // Explicit: the inherited TV text style's line height is sized for body text, so a
-            // wrapped 30sp title overlapped its second line.
-            lineHeight = 38.sp,
-            fontWeight = FontWeight.Black,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-          )
-          Spacer(Modifier.height(8.dp))
-          val subParts = buildList {
-            add(item.source.displayName)
-            val plays = item.songlist.playCount
-            if (!plays.isNullOrBlank()) add(plays) else add("热门播放")
-          }
-          Text(
-            subParts.joinToString(" · "),
-            color = Color.White.copy(alpha = 0.85f),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-          )
-          Spacer(Modifier.height(16.dp))
-          Box(
-            modifier = Modifier
-              .clip(RoundedCornerShape(50))
-              .background(Color.White)
-              .padding(horizontal = 18.dp, vertical = 10.dp),
-          ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Icon(
-                Icons.Filled.PlayArrow,
-                contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(18.dp),
-              )
-              Spacer(Modifier.width(4.dp))
-              Text("立即播放", color = tint, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            }
-          }
-        }
-        Spacer(Modifier.width(20.dp))
-        Box(
-          modifier = Modifier.size(180.dp).clip(RoundedCornerShape(14.dp)),
-        ) {
-          item.songlist.picURL?.let {
-            AsyncImage(
-              model = it,
-              contentDescription = null,
-              modifier = Modifier.fillMaxSize(),
-              contentScale = ContentScale.Crop,
-            )
-          } ?: Artwork(null, modifier = Modifier.fillMaxSize(), shape = RoundedCornerShape(14.dp))
-        }
-      }
-    }
-  }
-}
-
-@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-@Composable
-private fun SonglistRow(items: List<com.walkman.tv.data.model.SonglistInfo>, onSelect: (com.walkman.tv.data.model.SonglistInfo) -> Unit) {
-  val unique = androidx.compose.runtime.remember(items) { items.distinctBy { "${it.source.key}_${it.id}" } }
-  androidx.compose.foundation.lazy.LazyRow(
-    modifier = Modifier.focusRestorer(),
-    horizontalArrangement = Arrangement.spacedBy(14.dp),
-    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-  ) {
-    items(unique, key = { "${it.source.key}_${it.id}" }) { info ->
-      AlbumCard(
-        picURL = info.picURL,
-        title = info.name,
-        subtitle = info.playCount?.let { "▶ $it" } ?: info.source.displayName,
-        fallbackTint = info.source.tintColor(),
-        onClick = { onSelect(info) },
-      )
-    }
-  }
-}
-
-@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
-@Composable
-private fun BoardRow(items: List<com.walkman.tv.data.model.BoardInfo>, onSelect: (com.walkman.tv.data.model.BoardInfo) -> Unit) {
-  val unique = androidx.compose.runtime.remember(items) { items.distinctBy { "${it.source.key}_${it.id}" } }
-  androidx.compose.foundation.lazy.LazyRow(
-    modifier = Modifier.focusRestorer(),
-    horizontalArrangement = Arrangement.spacedBy(14.dp),
-    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-  ) {
-    items(unique, key = { "${it.source.key}_${it.id}" }) { board ->
-      AlbumCard(
-        picURL = board.picURL,
-        title = board.name,
-        subtitle = board.source.displayName,
-        fallbackTint = board.source.tintColor(),
-        onClick = { onSelect(board) },
-      )
-    }
-  }
-}
-
-@Composable
-private fun AlbumCard(
-  picURL: String?,
-  title: String,
-  subtitle: String?,
-  fallbackTint: Color,
-  onClick: () -> Unit,
-) {
-  Column(modifier = Modifier.width(170.dp)) {
-    TvFocusable(onClick = onClick, modifier = Modifier.size(170.dp), shape = RoundedCornerShape(12.dp)) {
-      Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))) {
-        if (!picURL.isNullOrBlank()) {
-          AsyncImage(
-            model = picURL,
-            contentDescription = null,
-            modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
-          )
-        } else {
-          Box(
-            modifier = Modifier.fillMaxSize().background(
-              Brush.linearGradient(listOf(fallbackTint, fallbackTint.copy(alpha = 0.5f))),
-            ),
-            contentAlignment = Alignment.Center,
-          ) {
-            Icon(
-              Icons.Filled.PlayArrow,
-              contentDescription = null,
-              tint = Color.White.copy(alpha = 0.7f),
-              modifier = Modifier.size(40.dp),
-            )
-          }
-        }
-      }
-    }
-    Spacer(Modifier.height(8.dp))
-    Text(
-      title,
-      color = AppColors.TextPrimary,
-      fontSize = 16.sp,
-      fontWeight = FontWeight.SemiBold,
-      maxLines = 2,
-      overflow = TextOverflow.Ellipsis,
-    )
-    if (!subtitle.isNullOrBlank()) {
-      Text(
-        subtitle,
-        color = AppColors.TextMuted,
-        fontSize = 13.sp,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
-  }
-}
-
-@Composable
 private fun LoadingPlaceholder() {
   Column(
     modifier = Modifier.fillMaxWidth(),
@@ -724,4 +525,69 @@ private fun com.walkman.tv.data.model.SourceID.tintColor(): Color = when (this) 
   com.walkman.tv.data.model.SourceID.WY -> AppColors.SourceWy
   com.walkman.tv.data.model.SourceID.MG -> AppColors.SourceMg
   com.walkman.tv.data.model.SourceID.LOCAL -> AppColors.SourceLocal
+}
+
+/** 首页卡片网格里的卡片：封面按格子宽度自适应（正方形），下面是标题 + 副标题。 */
+@Composable
+private fun GridAlbumCard(
+  picURL: String?,
+  title: String,
+  subtitle: String?,
+  fallbackTint: Color,
+  onClick: () -> Unit,
+  focusRequester: androidx.compose.ui.focus.FocusRequester? = null,
+) {
+  Column(modifier = Modifier.fillMaxWidth()) {
+    TvFocusable(
+      onClick = onClick,
+      modifier = Modifier
+        .fillMaxWidth()
+        .aspectRatio(1f)
+        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+      shape = RoundedCornerShape(12.dp),
+    ) {
+      Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))) {
+        if (!picURL.isNullOrBlank()) {
+          AsyncImage(
+            model = picURL,
+            contentDescription = null,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop,
+          )
+        } else {
+          Box(
+            modifier = Modifier.fillMaxSize().background(
+              Brush.linearGradient(listOf(fallbackTint, fallbackTint.copy(alpha = 0.5f))),
+            ),
+            contentAlignment = Alignment.Center,
+          ) {
+            Icon(
+              Icons.Filled.PlayArrow,
+              contentDescription = null,
+              tint = Color.White.copy(alpha = 0.7f),
+              modifier = Modifier.size(40.dp),
+            )
+          }
+        }
+      }
+    }
+    Spacer(Modifier.height(8.dp))
+    Text(
+      title,
+      color = AppColors.TextPrimary,
+      fontSize = 16.sp,
+      fontWeight = FontWeight.SemiBold,
+      maxLines = 2,
+      overflow = TextOverflow.Ellipsis,
+    )
+    if (!subtitle.isNullOrBlank()) {
+      Text(
+        subtitle,
+        color = AppColors.TextMuted,
+        fontSize = 13.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+  }
 }

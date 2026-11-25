@@ -15,7 +15,7 @@ sealed interface ResolveOrigin {
         override val label get() = "内置直连"
     }
     data class OtherSource(val source: SourceID) : ResolveOrigin {
-        override val label get() = "换源: ${source.displayName}"
+        override val label get() = "已自动换源"
     }
     data object LocalFile : ResolveOrigin {
         override val label get() = "本地"

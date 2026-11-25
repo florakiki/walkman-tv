@@ -111,6 +111,12 @@ fun TrackRowMobile(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+        // 音质角标（QQ音乐搜索页歌列表里有这列），取这首歌最高的音质。
+        val topQuality = com.walkman.tv.data.model.Quality.orderedHighToLow.firstOrNull { it in track.qualities }
+        if (topQuality != null) {
+            MiniChip(topQuality.badgeLabel)
+            Spacer(Modifier.width(8.dp))
+        }
         if (track.duration != null) {
             Text(track.intervalText, color = AppColors.TextMuted, fontSize = 12.sp)
         }

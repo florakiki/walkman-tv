@@ -59,13 +59,13 @@ fun MobileSonglistScreen(
     val scope = rememberCoroutineScope()
     val title = songlist?.name ?: board?.name ?: ""
     val cover = songlist?.picURL ?: board?.picURL
+    // 不显示平台来源：副标题只写作者和首数，不写是哪个平台的歌单/榜单。
     val subtitle = when {
         songlist != null -> listOfNotNull(
             songlist.author.takeIf { it.isNotEmpty() },
-            songlist.source.displayName,
             songlist.trackCount?.let { "$it 首" },
         ).joinToString(" · ")
-        board != null -> board.source.displayName
+        board != null -> ""
         else -> ""
     }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }

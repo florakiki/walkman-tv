@@ -106,8 +106,8 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
   // 核心自适应算法：获取屏幕物理总高度（DP），彻底摆脱内部组件相互挤压的局限
   val configuration = androidx.compose.ui.platform.LocalConfiguration.current
   val screenHeight = configuration.screenHeightDp.dp
-  // 强制将黑胶总盘面尺寸锚定为全屏高度的 67%（大屏自动等比放大，且视觉效果极为饱满）
-  val vinylAbsoluteSize = screenHeight * 0.67f
+  // 右侧大封面边长锚定为全屏高度的 67%（大屏自动等比放大，且视觉效果极为饱满）。
+  val coverSize = screenHeight * 0.67f
 
   val wantsFocus = !state.isMv && !showMvQueue && !showEqDialog && !showPicker
   LaunchedEffect(wantsFocus) {
@@ -118,11 +118,14 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
   // Activity，所以在 Activity.dispatchKeyEvent 层拦截：方向键 / 确认键只负责唤出控件（吞掉该次
   // 按键，避免确认键误触暂停）；返回、菜单、媒体键照常放行。
   var controlsVisible by remember { mutableStateOf(true) }
+  // 手动隐藏（遥控器在控制栏上按一下方向键下）：和 5 秒自动隐藏分开记，免得自动隐藏逻辑一启动
+  // 就把手动隐藏顶掉（autoHide 关着时旧逻辑会无条件把 controlsVisible 顶回 true）。
+  var manualHidden by remember { mutableStateOf(false) }
   var idleTick by remember { mutableStateOf(0) }
   val autoHideActive = settings.autoHidePlayerControls && wantsFocus
   LaunchedEffect(autoHideActive, controlsVisible, idleTick) {
     if (!autoHideActive) {
-      controlsVisible = true
+      if (!manualHidden) controlsVisible = true
       return@LaunchedEffect
     }
     if (controlsVisible) {
@@ -130,7 +133,7 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
       controlsVisible = false
     }
   }
-  androidx.compose.runtime.DisposableEffect(autoHideActive) {
+  androidx.compose.runtime.DisposableEffect(autoHideActive || manualHidden) {
     val events = appContainer.events
     // 唤出控件那一次按键的后续（长按重复 + 抬起）也吞掉，否则抬起时焦点已在播放键上会触发暂停。
     var wakeKey: Int? = null
@@ -144,11 +147,13 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
       if (e.action == android.view.KeyEvent.ACTION_DOWN) {
         wakeKey = e.keyCode
         controlsVisible = true
+        manualHidden = false
         scope.launch { tryRequestFocus(playFocus) }
       }
       true
     }
-    if (autoHideActive) events.keyInterceptor = interceptor
+    // 手动隐藏后也要装拦截器，否则方向键/确认键唤不回来（旧逻辑只在自动隐藏开着时装）。
+    if (autoHideActive || manualHidden) events.keyInterceptor = interceptor
     onDispose { if (events.keyInterceptor === interceptor) events.keyInterceptor = null }
   }
 
@@ -238,18 +243,12 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
 
         Spacer(Modifier.width(36.dp))
 
-        // 右侧黑胶盘面容器：直接赋予正方形物理尺寸命令，从根本上锁死比例，粉碎椭圆化风险
-        Box(
-          modifier = Modifier.size(vinylAbsoluteSize),
-          contentAlignment = Alignment.Center,
-        ) {
-          VinylDisc(
-            picURL = track.picURL,
-            isPlaying = state.isPlaying,
-            palette = vinylPalette(settings.vinylColor),
-            modifier = Modifier.fillMaxSize()
-          )
-        }
+        // 右侧大方封面（QQ音乐电视版播放页布局）：正方形大图，圆角，不再转黑胶盘。
+        com.walkman.tv.ui.components.Artwork(
+          track.picURL,
+          modifier = Modifier.size(coverSize),
+          shape = RoundedCornerShape(20.dp),
+        )
       }
 
       Spacer(Modifier.height(10.dp))
@@ -310,6 +309,8 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
             },
             onShowQueue = { showMvQueue = true },
             onTuneClick = { showEqDialog = true },
+            // 控制栏上按一下方向键下：隐藏整栏，再按任意方向键/确认键唤回。
+            onHideControls = { controlsVisible = false; manualHidden = true },
             playFocusRequester = playFocus,
             progressFocusRequester = progressFocus,
           )
@@ -336,165 +337,6 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
       )
     }
   }
-}
-
-// ============== Vinyl disc (去除了中心小黑洞，封面直达圆心) =====================================================================
-
-@Composable
-private fun VinylDisc(
-  picURL: String?,
-  isPlaying: Boolean,
-  palette: VinylPalette,
-  modifier: Modifier = Modifier,
-) {
-  val rotation = remember { Animatable(0f) }
-  LaunchedEffect(isPlaying) {
-    if (isPlaying) {
-      while (true) {
-        rotation.animateTo(
-          rotation.value + 360f,
-          animationSpec = tween(durationMillis = 30_000, easing = LinearEasing),
-        )
-      }
-    }
-  }
-  val circle = androidx.compose.foundation.shape.CircleShape
-
-  Box(modifier = modifier.aspectRatio(1f), contentAlignment = Alignment.Center) {
-    // 1) 外圈光晕（颜色随黑胶配色） (填满全尺寸)
-    Box(
-      modifier = Modifier
-        .fillMaxSize()
-        .clip(circle)
-        .background(
-          Brush.radialGradient(
-            colors = listOf(
-              palette.glow.copy(alpha = 0.55f * palette.glowStrength),
-              palette.glow.copy(alpha = 0.20f * palette.glowStrength),
-              palette.glow.copy(alpha = 0.00f),
-            ),
-          ),
-        ),
-    )
-    // 2) 黑胶主体盘面 (比例计算：300 / 360 ≈ 83.33%)
-    Box(
-      modifier = Modifier
-        .fillMaxSize(0.8333f)
-        .aspectRatio(1f)
-        .graphicsLayer { rotationZ = rotation.value },
-      contentAlignment = Alignment.Center,
-    ) {
-      VinylGrooves(palette, modifier = Modifier.fillMaxSize())
-
-      // 3) 内圈专辑封面 (比例计算：220 / 300 ≈ 73.33%)
-      // 优化：封面图现在无缝延伸到轴心最中心，不再被黑色块覆盖
-      Box(
-        modifier = Modifier
-          .fillMaxSize(0.7333f)
-          .aspectRatio(1f)
-          .clip(circle)
-          .background(AppColors.BgDeep),
-      ) {
-        Artwork(picURL, modifier = Modifier.fillMaxSize(), shape = circle)
-      }
-    }
-    // 💡 4) 原本位于此处的中心金属轴孔 Box 已被彻底移除，解决了黑洞不好看的问题
-  }
-}
-
-@Composable
-private fun VinylGrooves(palette: VinylPalette, modifier: Modifier) {
-  androidx.compose.foundation.Canvas(modifier = modifier.aspectRatio(1f)) {
-    val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
-    val outerRadius = size.minDimension / 2f
-    val innerRadius = outerRadius * 0.7333f
-
-    val baseScale = outerRadius / 150.dp.toPx()
-
-    drawCircle(color = palette.base, radius = outerRadius, center = center)
-
-    drawCircle(
-      brush = Brush.radialGradient(
-        colors = palette.body,
-        center = center,
-        radius = outerRadius,
-      ),
-      radius = outerRadius,
-      center = center,
-    )
-
-    val grooveCount = 32
-    for (i in 0 until grooveCount) {
-      val frac = i / (grooveCount - 1).toFloat()
-      val r = innerRadius + (outerRadius - innerRadius) * frac
-      val alpha = 0.20f + 0.10f * ((i % 5) / 5f)
-      val w = (if (i % 7 == 0) 1.2.dp.toPx() else 0.6.dp.toPx()) * baseScale
-      drawCircle(
-        color = Color.Black.copy(alpha = alpha),
-        radius = r,
-        center = center,
-        style = androidx.compose.ui.graphics.drawscope.Stroke(width = w),
-      )
-    }
-
-    drawCircle(
-      color = palette.rim.copy(alpha = 0.45f),
-      radius = innerRadius + 2.dp.toPx() * baseScale,
-      center = center,
-      style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5.dp.toPx() * baseScale),
-    )
-
-    drawCircle(
-      color = palette.rim.copy(alpha = 0.55f),
-      radius = outerRadius - 1.dp.toPx() * baseScale,
-      center = center,
-      style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx() * baseScale),
-    )
-  }
-}
-
-/** 黑胶配色：盘面底色 / 径向渐变 / 内外描边 / 外圈光晕。GREEN 即原版配色。 */
-private class VinylPalette(
-  val base: Color,
-  val body: List<Color>,
-  val rim: Color,
-  val glow: Color,
-  val glowStrength: Float = 1f,
-)
-
-private fun vinylPalette(color: com.walkman.tv.data.store.VinylColor): VinylPalette = when (color) {
-  com.walkman.tv.data.store.VinylColor.GREEN -> VinylPalette(
-    base = Color(0xFF0E2818),
-    body = listOf(Color(0xFF0A1F12), Color(0xFF112F1C), Color(0xFF1B4528)),
-    rim = AppColors.AccentGreen,
-    glow = AppColors.AccentGreen,
-  )
-  // 真黑胶：近黑盘面 + 淡灰描边，光晕压得很弱，避免发灰
-  com.walkman.tv.data.store.VinylColor.BLACK -> VinylPalette(
-    base = Color(0xFF0B0B0B),
-    body = listOf(Color(0xFF080808), Color(0xFF141414), Color(0xFF242424)),
-    rim = Color(0xFF9A9A9A),
-    glow = Color(0xFFFFFFFF),
-    glowStrength = 0.25f,
-  )
-  com.walkman.tv.data.store.VinylColor.RED -> VinylPalette(
-    base = Color(0xFF2A0D12),
-    body = listOf(Color(0xFF1E080C), Color(0xFF341018), Color(0xFF4E1A24)),
-    rim = Color(0xFFE0566B),
-    glow = Color(0xFFE0566B),
-  )
-  com.walkman.tv.data.store.VinylColor.BLUE -> VinylPalette(
-    base = Color(0xFF0C1A2E),
-    body = listOf(Color(0xFF081222), Color(0xFF102440), Color(0xFF1A365C)),
-    rim = Color(0xFF5B9BFF),
-    glow = Color(0xFF5B9BFF),
-  )
-  com.walkman.tv.data.store.VinylColor.GOLD -> VinylPalette(
-    base = Color(0xFF2A1E08),
-    body = listOf(Color(0xFF1E1505), Color(0xFF35260A), Color(0xFF4F3A12)),
-    rim = Color(0xFFE8B04A),
-    glow = Color(0xFFE8B04A),
-  )
 }
 
 // ============== 下方其余交互逻辑组件保持完全不变 =================================================================
@@ -579,6 +421,8 @@ private fun TransportBar(
   onMv: () -> Unit,
   onShowQueue: () -> Unit,
   onTuneClick: () -> Unit,
+  // 遥控器在控制栏上按一下方向键下，隐藏整栏（进度条 + 控制键），再按任意方向键/确认键唤回。
+  onHideControls: () -> Unit = {},
   playFocusRequester: FocusRequester? = null,
   progressFocusRequester: FocusRequester? = null,
 ) {
@@ -599,10 +443,16 @@ private fun TransportBar(
   val hasQuality = state.quality != null
 
   // 向下拦住（控制栏在最底部），向上统一回进度条。
+  // 在控制栏上按一下方向键下：隐藏整栏（进度条 + 控制键），再按任意方向键/确认键唤回。
   Box(
     modifier = Modifier.fillMaxWidth().focusProperties {
       down = FocusRequester.Cancel
       if (progressFocusRequester != null) up = progressFocusRequester
+    }.onPreviewKeyEvent { e ->
+      if (e.key == Key.DirectionDown && e.type == KeyEventType.KeyDown) {
+        onHideControls()
+        true
+      } else false
     },
   ) {
     Row(

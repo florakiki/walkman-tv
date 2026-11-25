@@ -102,9 +102,9 @@ class SourceManager(
         }
 
         if (scriptFor(track.source, "musicUrl") == null) {
-            throw SourceException("没有脚本提供 ${track.source.displayName} 源，请到设置 → 自定义音源 导入脚本")
+            throw SourceException("没有可用的播放源，请到设置 → 自定义音源 导入脚本")
         }
-        throw SourceException("这首 ${track.source.displayName} 歌曲无法获取播放地址，换一首或换个能用的脚本")
+        throw SourceException("这首歌无法获取播放地址，换一首或换个能用的脚本")
     }
 
     /** Play-time cross-source fallback (第 6 条)：解析时拿到的地址播起来才发现是坏的，
@@ -124,7 +124,7 @@ class SourceManager(
                 altLS.capabilities.sources[alt.source]?.qualities?.toSet() ?: emptySet(),
             )
             runCatching { resolveViaScript(alt, q, altLS) }.getOrNull()?.let { url ->
-                val warn = "原 ${track.source.displayName} 源无法获取播放地址，已换到 ${alt.source.displayName}"
+                val warn = "当前源无法获取播放地址，已自动换源"
                 return ResolvedTrack(url, ResolveOrigin.OtherSource(alt.source), q, warn)
             }
         }
@@ -144,7 +144,7 @@ class SourceManager(
 
     /** Ask a user script for lyric data — raw `{lyric, tlyric, rlyric, lxlyric}` (iOS `requestLyric`). */
     suspend fun requestLyric(track: Track): JSONObject? {
-        val ls = scriptFor(track.source, "lyric") ?: throw SourceException("没有脚本提供 ${track.source.displayName} 歌词")
+        val ls = scriptFor(track.source, "lyric") ?: throw SourceException("没有可用的歌词源")
         val info = JSONObject().put("type", "").put("musicInfo", makeOldMusicInfo(track))
         return ls.runtime.requestAction(track.source, "lyric", info) as? JSONObject
     }

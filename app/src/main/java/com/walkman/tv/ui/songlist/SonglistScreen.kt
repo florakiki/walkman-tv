@@ -27,9 +27,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import com.walkman.tv.data.model.SonglistInfo
-import com.walkman.tv.data.model.SonglistOrder
 import com.walkman.tv.data.model.SonglistTag
-import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.fetchOr
@@ -39,20 +37,12 @@ import com.walkman.tv.ui.components.MediaCard
 import com.walkman.tv.ui.components.TvPill
 import kotlinx.coroutines.launch
 
-private val songlistSources = listOf(SourceID.KW, SourceID.WY, SourceID.KG, SourceID.TX)
-
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
-    var source by remember { mutableStateOf(SourceID.KW) }
-    // Seed with the default source's first order (not null): the sibling effect below re-writes
-    // it with an *equal* value on first run, so mutableStateOf's structural equality skips the
-    // invalidation — the list effect runs exactly once on entry instead of fetch → cancel →
-    // refetch (the cancelled first fetch was the root of the empty-on-first-entry bug).
-    var order by remember {
-        mutableStateOf(appContainer.songlists.serviceFor(SourceID.KW)?.orders?.firstOrNull())
-    }
+    // 不显示平台来源：四个平台的歌单合并成一份网格，源的选择在后台（点歌单进详情时按歌单所属平台取）。
+    val services = remember { appContainer.songlists.servicesAll() }
     var tags by remember { mutableStateOf<List<SonglistTag>>(listOf(SonglistTag.ALL)) }
     var tag by remember { mutableStateOf(SonglistTag.ALL) }
     var lists by remember { mutableStateOf<List<SonglistInfo>>(emptyList()) }
@@ -60,39 +50,38 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var detail by remember { mutableStateOf<Pair<SonglistInfo, List<Track>>?>(null) }
     var loadingDetail by remember { mutableStateOf(false) }
 
-    val service = appContainer.songlists.serviceFor(source)
-
-    LaunchedEffect(source) {
-        order = service?.orders?.firstOrNull()
-        tag = SonglistTag.ALL
-        val groups = fetchOr(emptyList()) { service?.fetchTags() ?: emptyList() }
-        tags = listOf(SonglistTag.ALL) + groups.flatMap { it.tags }
+    // 四个平台的推荐歌单合并：每个平台取自己的第一种排序 + 当前标签，拼起来去重（按歌单 id）。
+    suspend fun fetchAllLists(t: SonglistTag): List<SonglistInfo> {
+        val all = mutableListOf<SonglistInfo>()
+        for (svc in services) {
+            val o = svc.orders?.firstOrNull() ?: continue
+            all += fetchOr(emptyList()) { svc.fetchRecommended(o, t, 1) }
+        }
+        return all.distinctBy { it.id }
     }
-    LaunchedEffect(source, order, tag) {
-        val o = order ?: return@LaunchedEffect
+
+    LaunchedEffect(Unit) {
+        val allTags = mutableListOf<SonglistTag>()
+        for (svc in services) {
+            val groups = fetchOr(emptyList()) { svc.fetchTags() }
+            allTags += groups.flatMap { it.tags }
+        }
+        tags = listOf(SonglistTag.ALL) + allTags.distinctBy { it.id }
+    }
+    LaunchedEffect(tag) {
         loading = true
-        lists = fetchOr(emptyList()) { service?.fetchRecommended(o, tag, 1) ?: emptyList() }
+        lists = fetchAllLists(tag)
         loading = false
     }
 
     // IMPORTANT: keep the grid UI in the composition even when detail is open. If we early-return
-    // here, the LaunchedEffect(source, order, tag) above leaves the composition; on the way back
+    // here, the LaunchedEffect(tag) above leaves the composition; on the way back
     // (detail=null) it re-fires as a fresh effect and re-fetches lists, blowing away the user's
     // grid scroll position and the previously-focused card. Rendering detail as an overlay keeps
     // the grid alive (state, focus, fetched lists), so back-navigation is instant and preserves
     // the selection.
     Box(modifier = modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                songlistSources.forEach { s ->
-                    TvPill(onClick = { source = s }, selected = source == s) { Text(s.displayName, fontSize = 12.sp) }
-                }
-                Spacer(Modifier.padding(start = 8.dp))
-                service?.orders?.forEach { o ->
-                    TvPill(onClick = { order = o }, selected = order?.id == o.id) { Text(o.name, fontSize = 12.sp) }
-                }
-            }
-            Spacer(Modifier.padding(top = 6.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 items(tags) { t ->
                     TvPill(onClick = { tag = t }, selected = tag.id == t.id && tag.name == t.name) { Text(t.name, fontSize = 12.sp) }
@@ -113,7 +102,7 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                         MediaCard(title = sl.name, picURL = sl.picURL, subtitle = sl.playCount?.let { "▶ $it" }) {
                             scope.launch {
                                 loadingDetail = true
-                                val d = fetchOr(null) { service?.fetchDetail(sl) }
+                                val d = fetchOr(null) { appContainer.songlists.serviceFor(sl.source)?.fetchDetail(sl) }
                                 detail = sl to (d?.tracks ?: emptyList())
                                 loadingDetail = false
                             }

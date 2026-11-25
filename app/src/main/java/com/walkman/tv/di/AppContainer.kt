@@ -21,6 +21,7 @@ import com.walkman.tv.source.OtherSourceFinder
 import com.walkman.tv.source.SourceManager
 import com.walkman.tv.source.builtin.BuiltInLyricResolver
 import com.walkman.tv.source.builtin.BuiltInResolver
+import com.walkman.tv.source.catalog.Artists
 import com.walkman.tv.source.catalog.Boards
 import com.walkman.tv.source.catalog.CatalogHttp
 import com.walkman.tv.source.catalog.Catalogs
@@ -58,6 +59,8 @@ class AppContainer(val appContext: Context) {
     val catalogHttp by lazy { CatalogHttp(httpClient) }
 
     val catalogs by lazy { Catalogs(catalogHttp) }
+    /** 歌手 + 专辑详情（ArtistCatalog：QQ/KG/KW/WY 直连接口，Ki.js 里没有）。 */
+    val artists by lazy { Artists(catalogHttp, catalogs) }
     val hotSearch by lazy { com.walkman.tv.source.catalog.HotSearch(catalogHttp) }
     val boards by lazy { Boards(catalogHttp) }
     val songlists by lazy { Songlists(catalogHttp) }

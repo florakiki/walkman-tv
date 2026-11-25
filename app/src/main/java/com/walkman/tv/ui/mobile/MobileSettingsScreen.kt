@@ -41,7 +41,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.walkman.tv.data.model.Quality
 import com.walkman.tv.data.store.LyricSize
-import com.walkman.tv.data.store.VinylColor
 import com.walkman.tv.playback.update.UpdateState
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.theme.AppColors
@@ -50,7 +49,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 手机设置：音质 / 内置增益 / 直通 / 强制软解 / 歌词 / 黑胶颜色 / 歌单备份 / 检查更新 / 关于。
+ * 手机设置：音质 / 内置增益 / 直通 / 强制软解 / 歌词 / 歌单备份 / 检查更新 / 关于。
  * 开关和电视版同一份 SettingsStore，改一处两边都生效。
  */
 @Composable
@@ -141,23 +140,6 @@ fun MobileSettingsScreen(modifier: Modifier = Modifier) {
                         selected = settings.lyricSize == size,
                         onClick = { scope.launch { appContainer.settingsStore.update { it.copy(lyricSize = size) } } },
                         label = { Text(size.label, fontSize = 13.sp) },
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = AppColors.BrandPrimary,
-                            selectedLabelColor = Color.White,
-                        ),
-                        modifier = Modifier.padding(end = 8.dp, bottom = 8.dp),
-                    )
-                }
-            }
-        }
-
-        SettingSection("黑胶颜色") {
-            FlowRow {
-                VinylColor.entries.forEach { color ->
-                    FilterChip(
-                        selected = settings.vinylColor == color,
-                        onClick = { scope.launch { appContainer.settingsStore.update { it.copy(vinylColor = color) } } },
-                        label = { Text(color.label, fontSize = 13.sp) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AppColors.BrandPrimary,
                             selectedLabelColor = Color.White,

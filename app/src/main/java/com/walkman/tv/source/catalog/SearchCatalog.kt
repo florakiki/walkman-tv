@@ -97,6 +97,8 @@ private class KuwoSearch(private val http: CatalogHttp) : SongCatalog {
         if (qs.isEmpty()) qs.add(Quality.K128)
         val albumId = decode(d.optString("ALBUMID")).ifEmpty { null }
         val extras = mutableMapOf<String, String>()
+        // 歌手页热门歌按 ARTISTID 过滤用（ArtistCatalog.KuwoArtist）。
+        d.optString("ARTISTID").ifEmpty { null }?.let { extras["artistId"] = it }
         // Kuwo: MVFLAG=="1" means the song has an MV; Kuwo's mvId is generally the same rid.
         if (d.optString("MVFLAG") == "1") extras["mvId"] = songmid
         return Track(

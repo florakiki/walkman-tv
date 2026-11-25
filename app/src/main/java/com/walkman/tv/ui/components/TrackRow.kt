@@ -136,7 +136,11 @@ fun TrackRow(
                 }
                 QualityBadge(track.qualities)
                 Spacer(Modifier.width(8.dp))
-                SourceChip(track.source)
+                // 时长（QQ音乐搜索页歌列表里有这列）。
+                if (track.duration != null) {
+                    Text(track.intervalText, color = AppColors.TextSecondary, fontSize = 13.sp)
+                }
+                // 不显示平台来源：歌是哪个平台的不在界面上标，源的选择全在后台自动做。
             }
         }
         if (onDownload != null || onAddToPlaylist != null || onRemove != null) {
