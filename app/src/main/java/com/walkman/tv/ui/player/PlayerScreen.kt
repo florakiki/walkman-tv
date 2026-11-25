@@ -1073,7 +1073,7 @@ private fun CoverBackdrop(picURL: String?) {
         modifier = Modifier.fillMaxSize(),
         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
       )
-      Box(modifier = Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)))
+      Box(modifier = Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.72f)))
       Box(
         modifier = Modifier.fillMaxSize().background(
           Brush.verticalGradient(

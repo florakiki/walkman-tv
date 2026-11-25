@@ -69,7 +69,7 @@ fun Artwork(
     modifier: Modifier = Modifier,
     shape: Shape = RoundedCornerShape(8.dp),
 ) {
-    Box(modifier = modifier.clip(shape).background(Color(0x14FFFFFF)), contentAlignment = Alignment.Center) {
+    Box(modifier = modifier.clip(shape).background(AppColors.GreenSoft), contentAlignment = Alignment.Center) {
         if (url.isNullOrEmpty()) {
             Icon(Icons.Filled.MusicNote, contentDescription = null, tint = AppColors.TextMuted, modifier = Modifier.size(28.dp))
         } else {

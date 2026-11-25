@@ -378,7 +378,7 @@ private fun CreatePlaylistCard(onClick: () -> Unit) {
  *  none). Reuses [Artwork] for each cell so loading + placeholder behaviour stays consistent. */
 @Composable
 private fun CoverMosaic(urls: List<String?>, modifier: Modifier = Modifier) {
-    Box(modifier = modifier.background(Color(0x14FFFFFF))) {
+    Box(modifier = modifier.background(AppColors.GreenSoft)) {
         val cleaned = urls.filterNotNull().filter { it.isNotEmpty() }
         when (cleaned.size) {
             0 -> Artwork(null, modifier = Modifier.fillMaxSize(), shape = RoundedCornerShape(0.dp))

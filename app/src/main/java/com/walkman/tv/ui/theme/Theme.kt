@@ -1,23 +1,24 @@
 package com.walkman.tv.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ColorScheme
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Typography
-import androidx.tv.material3.darkColorScheme
+import androidx.tv.material3.lightColorScheme
 
-private val WalkmanColorScheme: ColorScheme = darkColorScheme(
+// QQ 音乐风浅色主题（florakiki fork 改版，见 README“Fork 说明”）。
+private val WalkmanColorScheme: ColorScheme = lightColorScheme(
     primary = AppColors.AccentGreen,
-    onPrimary = AppColors.BgDeep,
+    onPrimary = Color.White,
     secondary = AppColors.AccentGreen,
     background = AppColors.BgDeep,
     onBackground = AppColors.TextPrimary,
     surface = AppColors.BgPanel,
     onSurface = AppColors.TextPrimary,
-    surfaceVariant = AppColors.Card,
+    surfaceVariant = AppColors.CardElevated,
     onSurfaceVariant = AppColors.TextSecondary,
     border = AppColors.FocusBorder,
 )
@@ -39,7 +40,6 @@ object Dimens {
 
 @Composable
 fun WalkmanTvTheme(content: @Composable () -> Unit) {
-    @Suppress("UNUSED_EXPRESSION") isSystemInDarkTheme() // TV is always dark here
     MaterialTheme(
         colorScheme = WalkmanColorScheme,
         typography = WalkmanTypography,
