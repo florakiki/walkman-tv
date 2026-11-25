@@ -23,6 +23,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -35,6 +37,7 @@ import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.TvPill
 import com.walkman.tv.ui.search.ArtistCard
 import com.walkman.tv.ui.theme.AppColors
+import kotlinx.coroutines.delay
 
 /**
  * 歌手浏览页（首页“歌手”入口进来）：顶上一排地区 tab（全部 / 内地 / 港台 / 欧美 / 日本 / 韩国），
@@ -55,6 +58,16 @@ fun SingerBrowseOverlay(
         singers = runCatching { appContainer.artists.hotSingers(region, 48) }.getOrDefault(emptyList())
         loading = false
     }
+    // 打开就抢一次焦点落到“全部” tab 上，不然焦点还留在被盖住的首页上、页面看着像冻住。
+    val firstTabFocus = remember { FocusRequester() }
+    var tabFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        for (attempt in 0 until 20) {
+            if (tabFocused) break
+            runCatching { firstTabFocus.requestFocus() }
+            delay(100)
+        }
+    }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
             Text(
@@ -65,11 +78,13 @@ fun SingerBrowseOverlay(
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SingerRegion.entries.forEach { r ->
+                SingerRegion.entries.forEachIndexed { index, r ->
                     TvPill(
                         onClick = { region = r },
                         selected = region == r,
                         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp),
+                        focusRequester = if (index == 0) firstTabFocus else null,
+                        modifier = if (index == 0) Modifier.onFocusChanged { if (it.isFocused) tabFocused = true } else Modifier,
                     ) {
                         Text(r.label, fontSize = 14.sp, fontWeight = if (region == r) FontWeight.Bold else FontWeight.Medium)
                     }

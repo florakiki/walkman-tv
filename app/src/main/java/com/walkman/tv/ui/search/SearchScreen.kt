@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -32,6 +33,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -59,6 +63,7 @@ import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -484,8 +489,16 @@ private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit) {
 
 /** 歌手卡片：圆形头像 + 名字 + 歌曲数 · 专辑数。 */
 @Composable
-fun ArtistCard(artist: ArtistInfo, onClick: () -> Unit) {
-    com.walkman.tv.ui.components.TvFocusable(onClick = onClick, modifier = Modifier.width(140.dp)) {
+fun ArtistCard(
+    artist: ArtistInfo,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+) {
+    com.walkman.tv.ui.components.TvFocusable(
+        onClick = onClick,
+        modifier = Modifier.width(140.dp)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+    ) {
         Column(
             modifier = Modifier.padding(8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -566,6 +579,18 @@ fun AlbumDetailOverlay(
         fullTracks = runCatching { appContainer.artists.fetchAlbumDetail(info) }.getOrDefault(emptyList())
     }
     val tracks = fullTracks?.takeIf { it.isNotEmpty() } ?: info.fallbackTracks
+    // 焦点锚点：曲目单拉不到时页面上只有一行提示、没有可聚焦的东西，遥控器按键会落在
+    // 被盖住的下层页面上、看着像冻住。空提示下面放一个可聚焦的“返回”，浮层打开就抢焦点。
+    val anchorFocus = remember { FocusRequester() }
+    var anchorFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(tracks.isEmpty()) {
+        if (tracks.isNotEmpty()) return@LaunchedEffect
+        for (attempt in 0 until 20) {
+            if (anchorFocused) break
+            runCatching { anchorFocus.requestFocus() }
+            delay(100)
+        }
+    }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
         Column(modifier = Modifier.fillMaxSize()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -591,7 +616,22 @@ fun AlbumDetailOverlay(
             )
             Spacer(Modifier.height(6.dp))
             if (tracks.isEmpty()) {
-                EmptyHint("这张专辑暂时拉不到曲目单", Modifier.fillMaxSize())
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text("这张专辑暂时拉不到曲目单", color = AppColors.TextSecondary, fontSize = 15.sp)
+                    Spacer(Modifier.height(16.dp))
+                    TvPill(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .focusRequester(anchorFocus)
+                            .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                    ) {
+                        Text("返回", fontSize = 14.sp)
+                    }
+                }
             } else {
                 val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
                 TrackList(
@@ -620,6 +660,21 @@ fun ArtistDetailOverlay(
     LaunchedEffect(artist) {
         detail = runCatching { appContainer.artists.fetchArtistDetail(artist) }.getOrNull()
         loaded = true
+    }
+    // 焦点锚点：浮层自己不抢焦点时（加载中 / 拉不到 / 热门歌为空），页面上没有可聚焦的
+    // 东西，遥控器按键会落在被盖住的下层页面上、看着像冻住。锚点保证浮层永远有可聚焦项：
+    // 加载中和空提示时是“返回” pill；只有专辑没有热门歌时是第一张专辑卡片；
+    // 热门歌在时 TrackList 自己抢初始焦点，不用锚点。
+    val anchorFocus = remember { FocusRequester() }
+    var anchorFocused by remember { mutableStateOf(false) }
+    val needAnchor = !loaded || detail == null || detail?.hotSongs.isNullOrEmpty()
+    LaunchedEffect(loaded, detail) {
+        if (!needAnchor) return@LaunchedEffect
+        for (attempt in 0 until 20) {
+            if (anchorFocused) break
+            runCatching { anchorFocus.requestFocus() }
+            delay(100)
+        }
     }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
@@ -650,8 +705,34 @@ fun ArtistDetailOverlay(
             }
             Spacer(Modifier.height(12.dp))
             when {
-                !loaded -> LoadingState(Modifier.fillMaxSize())
-                detail == null -> EmptyHint("歌手信息拉不到，换个平台试试", Modifier.fillMaxSize())
+                !loaded -> Box(modifier = Modifier.fillMaxSize()) {
+                    LoadingState(Modifier.fillMaxSize())
+                    TvPill(
+                        onClick = onBack,
+                        modifier = Modifier.align(Alignment.BottomCenter)
+                            .padding(bottom = 32.dp)
+                            .focusRequester(anchorFocus)
+                            .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                    ) {
+                        Text("返回", fontSize = 14.sp)
+                    }
+                }
+                detail == null -> Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text("歌手信息拉不到，换个平台试试", color = AppColors.TextSecondary, fontSize = 15.sp)
+                    Spacer(Modifier.height(16.dp))
+                    TvPill(
+                        onClick = onBack,
+                        modifier = Modifier
+                            .focusRequester(anchorFocus)
+                            .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                    ) {
+                        Text("返回", fontSize = 14.sp)
+                    }
+                }
                 else -> {
                     val d = detail!!
                     if (d.albums.isNotEmpty()) {
@@ -660,12 +741,16 @@ fun ArtistDetailOverlay(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
-                            items(d.albums, key = { "${it.source.key}_${it.id}" }) { album ->
+                            itemsIndexed(d.albums, key = { _, it -> "${it.source.key}_${it.id}" }) { index, album ->
                                 Box(modifier = Modifier.width(140.dp)) {
                                     MediaCard(
                                         title = album.name,
                                         picURL = album.picURL,
                                         subtitle = "${album.singer} · ${album.songCount?.let { "$it 首" } ?: ""}",
+                                        modifier = if (index == 0) Modifier
+                                            .focusRequester(anchorFocus)
+                                            .onFocusChanged { if (it.isFocused) anchorFocused = true }
+                                        else Modifier,
                                         onClick = { openAlbum = album },
                                     )
                                 }
@@ -684,7 +769,22 @@ fun ArtistDetailOverlay(
                             onPlay = { idx -> playList(d.hotSongs, idx); onOpenPlayer() },
                         )
                     } else if (d.albums.isEmpty()) {
-                        EmptyHint("这个歌手暂时没有可播的内容", Modifier.fillMaxSize())
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text("这个歌手暂时没有可播的内容", color = AppColors.TextSecondary, fontSize = 15.sp)
+                            Spacer(Modifier.height(16.dp))
+                            TvPill(
+                                onClick = onBack,
+                                modifier = Modifier
+                                    .focusRequester(anchorFocus)
+                                    .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                            ) {
+                                Text("返回", fontSize = 14.sp)
+                            }
+                        }
                     }
                 }
             }

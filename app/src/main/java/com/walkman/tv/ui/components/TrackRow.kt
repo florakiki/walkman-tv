@@ -274,7 +274,11 @@ fun TrackList(
     // below moves focus through these, so navigation never depends on Compose's spatial
     // focus search alone — that search is what left focus wandering to the TopNav instead
     // of landing on a song in the 热歌榜 detail list.
-    val rowFocusers = remember { mutableMapOf<Int, FocusRequester>() }
+    // 崩点教训（2026-11-26，Yang 实测）：显示出来的行没事，往下翻到还没显示的行就闪退——
+    // 旧步进对没组合出来的行直接请求焦点。修法见下面的 stepFocus：目标行不在屏幕上时，
+    // 先把列表滚过去、等行组合好再聚焦，失败有兜底，绝不对没显示的行直接请求焦点。
+    // 列表换了就重建整张表，不留指着已拆掉的行的旧 FocusRequester。
+    val rowFocusers = remember(tracks) { mutableMapOf<Int, FocusRequester>() }
     val focuserFor: (Int) -> FocusRequester = { rowFocusers.getOrPut(it) { FocusRequester() } }
     // Index of the row that currently holds focus (-1 = focus is outside the list).
     var focusedIndex by remember(tracks) { androidx.compose.runtime.mutableStateOf(-1) }
@@ -283,6 +287,25 @@ fun TrackList(
     // launched playback from.
     var lastClickedIndex by remember { androidx.compose.runtime.mutableStateOf(-1) }
     val scope = rememberCoroutineScope()
+    // 往上/往下一行移焦点。目标行已经在屏幕上就直接聚焦；还没显示出来（在屏幕外、没组合）
+    // 就先把列表滚过去，等一帧让行组合好再聚焦，再试一次还落不上就停在原地——不抛异常。
+    fun stepFocus(delta: Int): Boolean {
+        val target = focusedIndex + delta
+        if (focusedIndex < 0 || target < 0 || target >= tracks.size) return false
+        val visible = listState.layoutInfo.visibleItemsInfo.any { it.index == target }
+        if (visible) {
+            runCatching { focuserFor(target).requestFocus() }
+        } else {
+            scope.launch {
+                runCatching { listState.scrollToItem(target) }
+                delay(80)
+                runCatching { focuserFor(target).requestFocus() }
+                delay(80)
+                if (focusedIndex != target) runCatching { focuserFor(target).requestFocus() }
+            }
+        }
+        return true
+    }
     val atTop by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
@@ -291,10 +314,10 @@ fun TrackList(
 
     BackHandler(enabled = !atTop) {
         scope.launch {
-            listState.animateScrollToItem(0)
+            runCatching { listState.animateScrollToItem(0) }
             // Wait a frame so item 0 is composed/visible before requesting focus.
             delay(80)
-            focuserFor(0).requestFocus()
+            runCatching { focuserFor(0).requestFocus() }
         }
     }
 
@@ -304,11 +327,9 @@ fun TrackList(
             // Retry until the first row actually takes focus (onFocusChanged reports it
             // via focusedIndex) — but stop the moment focus is already inside the list,
             // so a late retry never yanks focus back from a row the user already moved to.
-            // (This Compose version's requestFocus() returns Unit, so success is read from
-            // the focus state, not a return value.)
             for (attempt in 0 until 20) {
                 if (focusedIndex >= 0) break
-                focuserFor(0).requestFocus()
+                runCatching { focuserFor(0).requestFocus() }
                 delay(100)
             }
         }
@@ -317,12 +338,12 @@ fun TrackList(
     // Restore focus to the most-recently clicked row when the player overlay closes.
     LaunchedEffect(Unit) {
         com.walkman.tv.ui.appContainer.events.playerClosed.collect {
-            if (lastClickedIndex >= 0) {
+            if (lastClickedIndex in tracks.indices) {
                 // Scroll it into view, wait for compose, then request focus.
-                runCatching { listState.animateScrollToItem(lastClickedIndex.coerceAtMost(tracks.size - 1)) }
+                runCatching { listState.animateScrollToItem(lastClickedIndex) }
                 repeat(5) {
                     delay(60)
-                    focuserFor(lastClickedIndex).requestFocus()
+                    runCatching { focuserFor(lastClickedIndex).requestFocus() }
                     if (focusedIndex == lastClickedIndex) return@collect
                 }
             }
@@ -343,25 +364,14 @@ fun TrackList(
         // Explicit Up/Down: step focus through the rows' own FocusRequesters instead of
         // relying on spatial focus search. Up from row 0 / Down from the last row fall
         // through (return false) so focus can still leave the list normally.
+        // 安全步进见上面的 stepFocus：目标行没显示出来时先滚出来再聚焦，不直接请求焦点。
         modifier = modifier
             .focusRestorer()
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (e.key) {
-                    Key.DirectionDown -> {
-                        if (focusedIndex < 0 || focusedIndex >= tracks.size - 1) false
-                        else {
-                            focuserFor(focusedIndex + 1).requestFocus()
-                            true
-                        }
-                    }
-                    Key.DirectionUp -> {
-                        if (focusedIndex <= 0) false
-                        else {
-                            focuserFor(focusedIndex - 1).requestFocus()
-                            true
-                        }
-                    }
+                    Key.DirectionDown -> stepFocus(+1)
+                    Key.DirectionUp -> stepFocus(-1)
                     else -> false
                 }
             },

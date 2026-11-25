@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -13,10 +14,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -239,10 +242,17 @@ private fun RecommendGrid(
       appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 12)
     }.getOrDefault(emptyList())
   }
-  // 首页打开时焦点落在第一张卡片上（以前是落在轮播横幅上）。
+  // 首页打开时焦点落在最上面那张卡片上（现在是歌手区第一张，没有歌手时是推荐歌单第一张）。
+  // 数据是异步拉的，首张卡片可能还没排好版，重试到焦点真正落进网格里为止；焦点已经在
+  // 网格里时就停，不把用户已移走的焦点拽回来。
   val firstCardFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
-  androidx.compose.runtime.LaunchedEffect(Unit) {
-    runCatching { firstCardFocus.requestFocus() }
+  var gridFocused by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+  androidx.compose.runtime.LaunchedEffect(hotSingers, home) {
+    for (attempt in 0 until 20) {
+      if (gridFocused) break
+      runCatching { firstCardFocus.requestFocus() }
+      delay(100)
+    }
   }
 
   androidx.compose.runtime.LaunchedEffect(settings.homeSources) {
@@ -282,7 +292,8 @@ private fun RecommendGrid(
   Box(modifier = modifier) {
     LazyVerticalGrid(
       columns = GridCells.Adaptive(minSize = 180.dp),
-      modifier = Modifier.fillMaxSize().focusGroup(),
+      modifier = Modifier.fillMaxSize().focusGroup()
+        .onFocusChanged { if (it.hasFocus) gridFocused = true },
       contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),
       horizontalArrangement = Arrangement.spacedBy(14.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -291,28 +302,32 @@ private fun RecommendGrid(
         settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
         home.isLoading && home.heroes.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
         else -> {
-          // 推荐歌单：每平台的第一张（heroes）+ 其余推荐，全部摊平成卡片网格，能往下滚。
+          // 推荐页顺序（Yang 定）：歌手 → 已播/收藏 → 排行榜 → 推荐歌单。
           val songlists = home.heroes.map { it.songlist } + home.recommendations
-          if (songlists.isNotEmpty()) {
+          // 歌手入口放最顶部：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
+          if (hotSingers.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-              SectionHeader("推荐歌单", null, trailing = "查看全部") {
-                onNavigate(NavSection.Songlist)
+              SectionHeader("歌手", null, trailing = "查看全部") {
+                browseSingers = true
               }
             }
-            gridItemsIndexed(
-              songlists.distinctBy { "${it.source.key}_${it.id}" },
-              key = { _, info -> "${info.source.key}_${info.id}" },
-            ) { index, info ->
-              GridAlbumCard(
-                picURL = info.picURL,
-                title = info.name,
-                subtitle = info.playCount?.let { "▶ $it" },
-                fallbackTint = info.source.tintColor(),
-                focusRequester = if (index == 0) firstCardFocus else null,
-                onClick = { openSonglist(info) },
-              )
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              androidx.compose.foundation.lazy.LazyRow(
+                modifier = Modifier.focusRestorer(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+              ) {
+                itemsIndexed(hotSingers, key = { _, it -> "${it.source.key}_${it.id}" }) { index, artist ->
+                  com.walkman.tv.ui.search.ArtistCard(
+                    artist = artist,
+                    onClick = { openArtist = artist },
+                    focusRequester = if (index == 0) firstCardFocus else null,
+                  )
+                }
+              }
             }
           }
+          item(span = { GridItemSpan(maxLineSpan) }) { StatsRow(onNavigate) }
           if (home.boards.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader("排行榜", null, trailing = "查看全部") {
@@ -332,26 +347,27 @@ private fun RecommendGrid(
               )
             }
           }
-          // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
-          if (hotSingers.isNotEmpty()) {
+          // 推荐歌单放最后：每平台的第一张（heroes）+ 其余推荐，全部摊平成卡片网格，能往下滚。
+          if (songlists.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-              SectionHeader("歌手", null, trailing = "查看全部") {
-                browseSingers = true
+              SectionHeader("推荐歌单", null, trailing = "查看全部") {
+                onNavigate(NavSection.Songlist)
               }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
-              androidx.compose.foundation.lazy.LazyRow(
-                modifier = Modifier.focusRestorer(),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-              ) {
-                items(hotSingers, key = { "${it.source.key}_${it.id}" }) { artist ->
-                  com.walkman.tv.ui.search.ArtistCard(artist = artist, onClick = { openArtist = artist })
-                }
-              }
+            gridItemsIndexed(
+              songlists.distinctBy { "${it.source.key}_${it.id}" },
+              key = { _, info -> "${info.source.key}_${info.id}" },
+            ) { index, info ->
+              GridAlbumCard(
+                picURL = info.picURL,
+                title = info.name,
+                subtitle = info.playCount?.let { "▶ $it" },
+                fallbackTint = info.source.tintColor(),
+                focusRequester = if (index == 0 && hotSingers.isEmpty()) firstCardFocus else null,
+                onClick = { openSonglist(info) },
+              )
             }
           }
-          item(span = { GridItemSpan(maxLineSpan) }) { StatsRow(onNavigate) }
         }
       }
     }
