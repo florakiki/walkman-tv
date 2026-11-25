@@ -106,7 +106,7 @@ private fun Brand(modifier: Modifier = Modifier) {
         )
         Spacer(Modifier.width(6.dp))
         Text(
-            text = "随便听",
+            text = "KITV音乐",
             color = AppColors.TextPrimary,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,

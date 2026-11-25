@@ -1,10 +1,10 @@
-# 随便听 · walkman-tv
+# KITV音乐
 
 > 一款面向大屏、遥控器友好的 **原生 Android TV 音乐播放器**，使用 **Kotlin + Jetpack Compose for TV** 编写，**安装后需先在设置页面配置自定义音源** ，否则播放不了音乐。
 
 <p>
-  <a href="https://github.com/SincereXing/walkman-tv/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/SincereXing/walkman-tv?display_name=tag&label=release&color=3DDC84"></a>
-  <a href="https://github.com/SincereXing/walkman-tv/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/SincereXing/walkman-tv/total?label=downloads&color=3DDC84"></a>
+  <a href="https://github.com/florakiki/walkman-tv/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/florakiki/walkman-tv?display_name=tag&label=release&color=3DDC84"></a>
+  <a href="https://github.com/florakiki/walkman-tv/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/florakiki/walkman-tv/total?label=downloads&color=3DDC84"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Android%20TV-3DDC84">
   <img alt="language" src="https://img.shields.io/badge/Kotlin-Compose%20for%20TV-7F52FF">
   <img alt="minSdk" src="https://img.shields.io/badge/minSdk-23-blue">
@@ -36,12 +36,12 @@
 
 前往 **[Releases](../../releases/latest)** 下载最新 APK，用 U 盘 / `adb install` 装到 Android TV 即可。
 
-- **`walkman-tv-x.y.z-universal-release.apk`** —— 通用包，不确定机型就下它（体积稍大，任意 ABI 都能装）。
-- **`walkman-tv-x.y.z-arm64-v8a-release.apk`** —— 现代电视/盒子（2018 年后，64 位 ARM），体积更小。
-- **`walkman-tv-x.y.z-armeabi-v7a-release.apk`** —— 老的 32 位 ARM 机型。
-- **`walkman-tv-x.y.z-x86_64-release.apk`** —— x86 盒子 / Android TV 模拟器。
+- **`kitv-music-x.y.z-universal-release.apk`** —— 通用包，不确定机型就下它（体积稍大，任意 ABI 都能装）。
+- **`kitv-music-x.y.z-arm64-v8a-release.apk`** —— 现代电视/盒子（2018 年后，64 位 ARM），体积更小。
+- **`kitv-music-x.y.z-armeabi-v7a-release.apk`** —— 老的 32 位 ARM 机型。
+- **`kitv-music-x.y.z-x86_64-release.apk`** —— x86 盒子 / Android TV 模拟器。
 
-> 安装：`adb connect <电视IP>` 后 `adb install walkman-tv-x.y.z-universal-release.apk`；或把 APK 拷到 U 盘，用电视上的「文件管理器 / 安装包安装器」打开。首次安装需在系统设置里允许「未知来源 / 安装未知应用」。系统要求 Android 6.0+（minSdk 23）。
+> 安装：`adb connect <电视IP>` 后 `adb install kitv-music-x.y.z-universal-release.apk`；或把 APK 拷到 U 盘，用电视上的「文件管理器 / 安装包安装器」打开。首次安装需在系统设置里允许「未知来源 / 安装未知应用」。系统要求 Android 6.0+（minSdk 23）。
 
 ---
 
@@ -219,6 +219,8 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 改动只做风格，不改功能与音源逻辑：
 - 主题由纯暗色改成 QQ 音乐风浅色：底色 `#F4F6F4`、白卡片、品牌绿 `#00C168`、当前歌词深绿 `#00A656`、遥控焦点绿描边（`ui/theme/Color.kt`、`ui/theme/Theme.kt`、`res/values/colors.xml`）。
 - 播放器封面背景由黑色遮罩改成白色遮罩，封面占位底改成淡绿；黑胶盘面配色、推荐横幅、二维码白底等装饰性颜色保持原样。
+- 应用改名 KITV音乐（`app_name`、顶栏、手机助手页、退出提示等处原“随便听”均已改名；包名仍为 `com.walkman.tv`）。
+- 版本号改为 `1.0.0`（versionCode 1），App 内“检查更新”改为查本仓库 `florakiki/walkman-tv` 的 releases，不再去上游。
 
 ## 📄 License
 

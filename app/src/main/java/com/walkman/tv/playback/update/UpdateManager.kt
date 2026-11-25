@@ -99,7 +99,7 @@ class UpdateManager(
      *  download URL first, then each proxy in turn (mainland China fallback). */
     suspend fun download(release: AppRelease) {
         _state.value = UpdateState.Downloading(0f)
-        val dest = File(File(appContext.cacheDir, "update"), "walkman-tv-${release.versionName}.apk")
+        val dest = File(File(appContext.cacheDir, "update"), "kitv-music-${release.versionName}.apk")
         // Official first, then proxies.
         val candidates = listOf(release.apkUrl) + DOWNLOAD_PROXIES.map { it + release.apkUrl }
         _state.value = withContext(Dispatchers.IO) {
@@ -162,7 +162,7 @@ class UpdateManager(
             .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
         if (apks.isEmpty()) throw IOException("该版本没有可用的 APK")
         // Prefer an APK matching the device's ABI (highest-priority ABI first); the asset names
-        // are like walkman-tv-1.3.2-arm64-v8a-release.apk. Fall back to the universal build.
+        // are like kitv-music-1.0.0-arm64-v8a-release.apk. Fall back to the universal build.
         val chosen = Build.SUPPORTED_ABIS.firstNotNullOfOrNull { abi ->
             apks.firstOrNull { it.optString("name").contains("-$abi-") }
         } ?: apks.firstOrNull { it.optString("name").contains("-universal-") }
@@ -215,9 +215,9 @@ class UpdateManager(
 
     companion object {
         private const val TAG = "UpdateManager"
-        private const val OWNER = "SincereXing"
+        private const val OWNER = "florakiki"
         private const val REPO = "walkman-tv"
-        private const val UA = "walkman-tv-updater"
+        private const val UA = "kitv-music-updater"
 
         // GitHub proxy prefixes for mainland China (official host is often blocked/slow). Prefix
         // form: "<proxy>/https://github.com/...". Verified reachable at release time; if one dies

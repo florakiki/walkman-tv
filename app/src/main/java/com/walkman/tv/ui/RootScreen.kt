@@ -181,7 +181,7 @@ private fun ExitConfirmDialog(onCancel: () -> Unit, onConfirm: () -> Unit) {
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                text = "确定要退出随便听吗？",
+                text = "确定要退出KITV音乐吗？",
                 color = AppColors.TextSecondary,
                 fontSize = 14.sp,
             )
