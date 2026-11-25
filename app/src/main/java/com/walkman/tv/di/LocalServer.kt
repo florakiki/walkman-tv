@@ -5,6 +5,21 @@ import fi.iki.elonen.NanoHTTPD
 import java.io.File
 
 /**
+ * 局域网同步歌单的服务端回调（AppContainer 实现，LocalServer 只负责 HTTP 层）。
+ * 回调在 NanoHTTPD 的工作线程上跑，阻塞调用没问题。
+ */
+interface SyncHandler {
+    /** GET /api/sync/info 的 JSON：{"name","deviceId","version"}，不用鉴权。 */
+    fun infoJson(): String
+    /** GET /api/sync/playlists 的 JSON：LibraryStore.exportBackupJson()。 */
+    fun exportJson(): String
+    /** POST /api/sync/playlists：把对方推来的备份 JSON 合并进本机，返回合并报告。 */
+    fun importJson(raw: String): com.walkman.tv.data.sync.MergeReport
+    /** 完整 token 或 6 位同步码都认。 */
+    fun checkToken(token: String?): Boolean
+}
+
+/**
  * Tiny in-app HTTP server that exposes mobile-friendly forms over the LAN so the user's phone
  * can push input into the TV (search keyword, custom-source script URL, or uploaded .js file).
  * The TV side advertises the URL via a QR dialog.
@@ -19,6 +34,9 @@ import java.io.File
  *   POST /api/playlist-name  - field "name" -> events.qrPlaylistName
  *   GET  /songlist-url       - songlist URL paste form (avoids TV-side IME entirely)
  *   POST /api/songlist-url   - field "url"  -> events.qrSonglistUrl
+ *   GET  /api/sync/info      - sync peer info (no auth): {"name","deviceId","version"}
+ *   GET  /api/sync/playlists - export local playlists as backup JSON (?token=)
+ *   POST /api/sync/playlists - merge the posted backup JSON (?token=, raw JSON body)
  */
 class LocalServer private constructor(
     private val events: AppEvents,
@@ -26,6 +44,7 @@ class LocalServer private constructor(
     // Supplied by AppContainer; called on NanoHTTPD's worker thread (blocking is fine here).
     private val hotSearchJson: () -> String,
     port: Int,
+    private val sync: SyncHandler? = null,
 ) : NanoHTTPD(port) {
 
     /** Port the server is bound to. */
@@ -55,6 +74,17 @@ class LocalServer private constructor(
 
     private fun handleGet(session: IHTTPSession): Response = when (session.uri.trimEnd('/')) {
         "/api/hotsearch" -> json(runCatching { hotSearchJson() }.getOrDefault("[]"))
+        "/api/sync/info" -> sync?.let { json(it.infoJson()) } ?: notFound()
+        "/api/sync/playlists" -> {
+            // handleGet 是表达式体，分支里不能用 return：用 if/else 让最后一个表达式就是返回值。
+            val s = sync
+            if (s == null) {
+                notFound()
+            } else {
+                val token = session.parameters["token"]?.firstOrNull()
+                if (!s.checkToken(token)) unauthorized() else json(s.exportJson())
+            }
+        }
         "/search" -> html(SEARCH_HTML)
         "/script" -> html(SCRIPT_HTML)
         "/playlist-name" -> html(PLAYLIST_NAME_HTML)
@@ -64,6 +94,23 @@ class LocalServer private constructor(
     }
 
     private fun handlePost(session: IHTTPSession): Response {
+        // 同步接口用原始 JSON body，不走 parseBody（表单解析会吃掉 body）。
+        if (session.uri.trimEnd('/') == "/api/sync/playlists") {
+            val s = sync ?: return notFound()
+            val token = session.parameters["token"]?.firstOrNull()
+            if (!s.checkToken(token)) return unauthorized()
+            val raw = readRawBody(session)
+            if (raw.isBlank()) return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "空内容")
+            val report = runCatching { s.importJson(raw) }.getOrElse {
+                return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, it.message ?: "备份格式不对")
+            }
+            return json(
+                kotlinx.serialization.json.Json.encodeToString(
+                    com.walkman.tv.data.sync.MergeReport.serializer(),
+                    report,
+                ),
+            )
+        }
         val files = HashMap<String, String>()
         session.parseBody(files) // populates params for url-encoded; stores tmp paths for multipart
         val params = session.parameters
@@ -111,13 +158,31 @@ class LocalServer private constructor(
     private fun notFound(): Response =
         newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not Found")
 
+    private fun unauthorized(): Response =
+        newFixedLengthResponse(Response.Status.UNAUTHORIZED, MIME_PLAINTEXT, "同步码不对")
+
+    /** 同步接口的原始 JSON body：按 Content-Length 直接读，不走 parseBody。 */
+    private fun readRawBody(session: IHTTPSession): String {
+        val len = session.headers["content-length"]?.toIntOrNull() ?: 0
+        if (len <= 0) return ""
+        val buf = ByteArray(len)
+        var read = 0
+        val input = session.inputStream
+        while (read < len) {
+            val n = input.read(buf, read, len - read)
+            if (n < 0) break
+            read += n
+        }
+        return String(buf, 0, read, Charsets.UTF_8)
+    }
+
     companion object {
         private const val TAG = "LocalServer"
 
         /** Start the local server, trying a small range of ports in case 8765 is busy. */
-        fun start(events: AppEvents, hotSearchJson: () -> String = { "[]" }): LocalServer? {
+        fun start(events: AppEvents, hotSearchJson: () -> String = { "[]" }, sync: SyncHandler? = null): LocalServer? {
             for (port in listOf(8765, 8766, 8767, 8768)) {
-                val server = LocalServer(events, hotSearchJson, port)
+                val server = LocalServer(events, hotSearchJson, port, sync)
                 if (server.tryStart()) return server
             }
             return null

@@ -44,12 +44,16 @@ import androidx.core.content.ContextCompat
 import com.walkman.tv.ui.components.FolderBrowser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import com.walkman.tv.data.sync.LanSyncController
+import com.walkman.tv.data.sync.NsdSyncDiscovery
+import com.walkman.tv.data.sync.SyncDirection
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -462,6 +466,8 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             status?.let { Text(it, color = AppColors.TextSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
         }
 
+        SyncSection()
+
         Section("自定义音源") {
             Text(
                 "粘贴 URL 自动远程拉取；直接粘贴脚本则按 JS 代码导入；或上传 .js 文件；扫码可在手机/电脑操作。",
@@ -763,6 +769,162 @@ private fun UpdateSection() {
             },
             selected = true,
         ) { Text(actionLabel, fontSize = 14.sp) }
+    }
+}
+
+/**
+ * 局域网同步歌单（电视版入口；手机版在 MobileSyncScreen 里用同一套 LanSyncController）。
+ * 电视亮二维码，手机扫码配对；同一 WiFi 下的手机也会自动出现在列表里，点一下填 6 位同步码
+ * 就能配对、勾选，再点「开始同步」。只同步歌单，不同步已下载的音频文件。
+ */
+@Composable
+private fun SyncSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val controller = remember { LanSyncController(appContainer, context) }
+    val discovered by controller.discovered.collectAsState()
+    val saved by controller.savedPeers.collectAsState()
+    val selected by controller.selectedIds.collectAsState()
+    var showQr by remember { mutableStateOf(false) }
+    var pairingTarget by remember { mutableStateOf<NsdSyncDiscovery.DiscoveredPeer?>(null) }
+    var pairingCode by remember { mutableStateOf("") }
+    var pairingError by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) { controller.start() }
+    DisposableEffect(Unit) { onDispose { controller.stop() } }
+
+    Section("局域网同步歌单") {
+        Text(
+            "同一 WiFi 下，和手机互相同步歌单（收藏 / 历史 / 自建列表），不同步已下载的音频。",
+            color = AppColors.TextMuted,
+            fontSize = 11.sp,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TvPill(onClick = { showQr = true }, selected = true) { Text("显示二维码", fontSize = 14.sp) }
+        }
+        Text(
+            "本机同步码：${controller.myCode.chunked(2).joinToString(" ")}" +
+                (controller.myAddress()?.let { "（$it）" } ?: ""),
+            color = AppColors.TextSecondary,
+            fontSize = 13.sp,
+        )
+        if (discovered.isEmpty() && saved.isEmpty()) {
+            Text("还没发现设备：确认手机也在同步页、连着同一个 WiFi；或让手机扫上面的二维码。", color = AppColors.TextMuted, fontSize = 12.sp)
+        }
+        discovered.forEach { d ->
+            val savedPeer = controller.savedPeerFor(d.host ?: "", d.port)
+            ToggleRow(
+                "${d.displayName}（${d.host}:${d.port}）" + if (savedPeer == null) " — 未配对，点一下填同步码" else "",
+                savedPeer?.let { it.id in selected } ?: false,
+            ) {
+                if (savedPeer != null) {
+                    controller.toggleSelect(savedPeer.id)
+                } else {
+                    pairingTarget = d
+                    pairingCode = ""
+                    pairingError = null
+                }
+            }
+        }
+        saved.forEach { peer ->
+            ToggleRow("${peer.name}（${peer.host}:${peer.port}）", peer.id in selected) {
+                controller.toggleSelect(peer.id)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SyncDirection.entries.forEach { dir ->
+                TvPill(
+                    onClick = { controller.direction = dir },
+                    selected = controller.direction == dir,
+                ) {
+                    Text(dir.label, fontSize = 13.sp)
+                }
+            }
+        }
+        TvPill(
+            onClick = { scope.launch { controller.syncSelected() } },
+            selected = true,
+        ) {
+            Text(if (controller.busy) "同步中…" else "开始同步", fontSize = 14.sp)
+        }
+        controller.status?.let {
+            Text(it, color = AppColors.TextSecondary, fontSize = 12.sp)
+        }
+    }
+
+    if (showQr) {
+        val payload = remember { controller.myQrPayload() }
+        if (payload != null) {
+            QrDialog(
+                url = payload,
+                title = "扫码同步歌单",
+                subtitle = "在手机 KITV音乐 的同步页点「扫码添加设备」扫这个码",
+                onDismiss = { showQr = false },
+            )
+        } else {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showQr = false },
+                title = { Text("无法启动扫码") },
+                text = { Text("请确认电视已连接 Wi-Fi 且本地服务已启动后再试。") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(onClick = { showQr = false }) {
+                        Text("好", color = AppColors.AccentGreen)
+                    }
+                },
+                containerColor = AppColors.BgPanel,
+                titleContentColor = AppColors.TextPrimary,
+                textContentColor = AppColors.TextSecondary,
+            )
+        }
+    }
+
+    pairingTarget?.let { target ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pairingTarget = null },
+            title = { Text("配对 ${target.displayName}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("在手机的同步页看 6 位同步码，填进来：", color = AppColors.TextSecondary, fontSize = 13.sp)
+                    TvTextFieldHost(shape = RoundedCornerShape(4.dp)) { fieldModifier ->
+                        OutlinedTextField(
+                            value = pairingCode,
+                            onValueChange = { if (it.length <= 6) pairingCode = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().then(fieldModifier),
+                            placeholder = { Text("6 位同步码", color = AppColors.TextMuted) },
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = AppColors.TextPrimary,
+                                unfocusedTextColor = AppColors.TextPrimary,
+                                focusedBorderColor = AppColors.AccentGreen,
+                                unfocusedBorderColor = AppColors.Card,
+                                cursorColor = AppColors.AccentGreen,
+                            ),
+                        )
+                    }
+                    pairingError?.let {
+                        Text(it, color = AppColors.Danger, fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    scope.launch {
+                        val r = controller.addManual("${target.host}:${target.port}", pairingCode)
+                        r.fold(
+                            { pairingTarget = null },
+                            { pairingError = "配对失败：${it.message}" },
+                        )
+                    }
+                }) { Text("配对", color = AppColors.AccentGreen) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { pairingTarget = null }) { Text("取消") }
+            },
+            containerColor = AppColors.BgPanel,
+            titleContentColor = AppColors.TextPrimary,
+            textContentColor = AppColors.TextSecondary,
+        )
     }
 }
 

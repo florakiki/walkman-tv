@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- false = 电视版界面（RootScreen）；手机 flavor 在 src/mobile/res/values/bools.xml 里覆写为 true -->
+    <bool name="is_mobile">false</bool>
+</resources>

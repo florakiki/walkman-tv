@@ -96,6 +96,38 @@ class AppContainer(val appContext: Context) {
     val settingsStore: SettingsStore by lazy { SettingsStore(appContext) }
     val playbackSnapshotStore: PlaybackSnapshotStore by lazy { PlaybackSnapshotStore(appContext) }
     val searchHistoryStore: SearchHistoryStore by lazy { SearchHistoryStore(appContext) }
+
+    /** 局域网同步身份 + 配对设备（sync.json）。 */
+    val syncPeerStore: com.walkman.tv.data.sync.SyncPeerStore by lazy {
+        com.walkman.tv.data.sync.SyncPeerStore(appContext)
+    }
+    /** mDNS 广播 / 发现（电视和手机互相看到对方）。 */
+    val syncDiscovery: com.walkman.tv.data.sync.NsdSyncDiscovery by lazy {
+        com.walkman.tv.data.sync.NsdSyncDiscovery(appContext)
+    }
+    /** LocalServer 同步接口的回调：导出 / 合并本机歌单、验同步码。 */
+    val syncHandler: SyncHandler by lazy {
+        object : SyncHandler {
+            override fun infoJson(): String {
+                val data = syncPeerStore.data.value
+                return kotlinx.serialization.json.Json.encodeToString(
+                    com.walkman.tv.data.sync.SyncInfo.serializer(),
+                    com.walkman.tv.data.sync.SyncInfo(
+                        name = data.deviceName,
+                        deviceId = data.deviceId,
+                        version = updateManager.currentVersion,
+                    ),
+                )
+            }
+
+            override fun exportJson(): String = libraryStore.exportBackupJson()
+
+            override fun importJson(raw: String): com.walkman.tv.data.sync.MergeReport =
+                kotlinx.coroutines.runBlocking { libraryStore.mergeBackupJson(raw) }.getOrThrow()
+
+            override fun checkToken(token: String?): Boolean = syncPeerStore.checkToken(token)
+        }
+    }
     val coverCache: com.walkman.tv.data.store.CoverCache by lazy {
         com.walkman.tv.data.store.CoverCache(appContext)
     }
@@ -281,11 +313,20 @@ class AppContainer(val appContext: Context) {
     fun bootstrap() {
         // Bring up the LAN HTTP server (best-effort; QR features just won't work if it fails).
         if (localServer == null) {
-            localServer = LocalServer.start(events, hotSearchJson = { hotSearchJsonBlocking() })
+            localServer = LocalServer.start(
+                events,
+                hotSearchJson = { hotSearchJsonBlocking() },
+                sync = syncHandler,
+            )
         }
         appScope.launch {
             settingsStore.loadAll()
             libraryStore.loadAll()
+            syncPeerStore.loadAll()
+            // 广播本机同步服务，让同一 WiFi 下的另一台设备在同步页里直接看到本机。
+            localServer?.let { srv ->
+                syncDiscovery.advertise(srv.boundPort, syncPeerStore.data.value.deviceName)
+            }
             settingsStore.settings.onEach { s ->
                 playbackController.preferredQuality = s.preferredQuality
                 playbackController.builtinGainEnabled = s.builtinGainEnabled

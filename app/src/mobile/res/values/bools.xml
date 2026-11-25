@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 手机 flavor：竖屏触屏界面（MobileRootScreen），与电视版同一份代码、不同包名 -->
+    <bool name="is_mobile">true</bool>
+</resources>

@@ -164,6 +164,65 @@ class LibraryStore(context: Context) {
         2 + data.userLists.size
     }
 
+    /**
+     * 局域网同步用：把对方的备份 JSON **合并**进来（不是替换）。
+     * 收藏 / 历史按歌曲 id 去重并集；自建列表按 id 认：同 id 的并歌，不同 id 的整条收进来。
+     * 历史最多留 200 首。返回新增统计，供同步结果显示。
+     */
+    suspend fun mergeBackupJson(raw: String): Result<com.walkman.tv.data.sync.MergeReport> = runCatching {
+        val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+        val data = json.decodeFromString(LibraryData.serializer(), raw)
+
+        val loveSeen = _love.value.tracks.mapTo(HashSet()) { it.id }
+        val newLove = data.love.tracks.filter { loveSeen.add(it.id) }
+        if (newLove.isNotEmpty()) {
+            _love.value = _love.value.copy(
+                tracks = _love.value.tracks + newLove,
+                updatedAt = maxOf(_love.value.updatedAt, data.love.updatedAt),
+            )
+        }
+
+        val histSeen = _history.value.tracks.mapTo(HashSet()) { it.id }
+        val newHist = data.history.tracks.filter { histSeen.add(it.id) }
+        if (newHist.isNotEmpty()) {
+            _history.value = _history.value.copy(
+                tracks = (_history.value.tracks + newHist).take(200),
+                updatedAt = maxOf(_history.value.updatedAt, data.history.updatedAt),
+            )
+        }
+
+        var addedLists = 0
+        var addedTracks = 0
+        val merged = _userLists.value.toMutableList()
+        for (incoming in data.userLists) {
+            val idx = merged.indexOfFirst { it.id == incoming.id }
+            if (idx < 0) {
+                merged += incoming
+                addedLists++
+            } else {
+                val cur = merged[idx]
+                val seen = cur.tracks.mapTo(HashSet()) { it.id }
+                val fresh = incoming.tracks.filter { seen.add(it.id) }
+                addedTracks += fresh.size
+                if (fresh.isNotEmpty()) {
+                    merged[idx] = cur.copy(
+                        tracks = cur.tracks + fresh,
+                        updatedAt = maxOf(cur.updatedAt, incoming.updatedAt),
+                    )
+                }
+            }
+        }
+        _userLists.value = merged
+        persist()
+        com.walkman.tv.data.sync.MergeReport(
+            addedLove = newLove.size,
+            addedHistory = newHist.size,
+            addedLists = addedLists,
+            addedTracks = addedTracks,
+            totalLists = 2 + merged.size,
+        )
+    }
+
     private suspend fun persist() = withContext(Dispatchers.IO) {
         store.save(LibraryData(_love.value, _history.value, _userLists.value))
     }

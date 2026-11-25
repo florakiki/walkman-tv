@@ -11,21 +11,32 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Modifier
 import com.walkman.tv.ui.RootScreen
+import com.walkman.tv.ui.mobile.MobileRootScreen
+import com.walkman.tv.ui.mobile.MobileTheme
 import com.walkman.tv.ui.theme.AppColors
 import com.walkman.tv.ui.theme.WalkmanTvTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 手机 flavor（src/mobile/res/values/bools.xml）为 true → 触屏竖屏界面；
+        // 电视版为 false → 原来的遥控界面。包名不同，两版可以共存。
+        val isMobile = resources.getBoolean(R.bool.is_mobile)
         setContent {
-            WalkmanTvTheme {
-                // Keep the TV screen awake while audio/video is playing.
-                val playing = App.container.playbackController.state.collectAsState().value.isPlaying
-                LaunchedEffect(playing) {
-                    if (playing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            // Keep the screen awake while audio/video is playing.
+            val playing = App.container.playbackController.state.collectAsState().value.isPlaying
+            LaunchedEffect(playing) {
+                if (playing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            if (isMobile) {
+                MobileTheme {
+                    MobileRootScreen(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep))
                 }
-                RootScreen(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep))
+            } else {
+                WalkmanTvTheme {
+                    RootScreen(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep))
+                }
             }
         }
     }
