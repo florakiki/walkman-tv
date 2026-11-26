@@ -687,12 +687,14 @@ private class KuwoArtist(private val http: CatalogHttp, private val catalogs: Ca
         // 酷我没有歌手详情接口：热门歌 = 按歌手名搜歌再按 ARTISTID 过滤，专辑 = 这些歌按专辑聚合。
         // 一页 30 首里每张专辑往往只出现一次，聚合出来的歌数全是 1 首——首屏多拉 3 页（90 首）
         // 再聚合；往下翻到底继续拉歌，专辑随歌一起长出来。
-        val raws = (0..2).map { page ->
-            runCatching { searchKwSongs(artist.name, page + 1) }.getOrDefault(emptyList())
-        }
-        val songs = raws.flatten().filter { it.extras["artistId"] == artist.id }.distinctBy { it.id }
+        // 第 1 页走 catalogs.search（给每首歌补封面，播的时候左边面板有封面）；
+        // 第 2-3 页直接调 search.kuwo.cn（不补封面，省请求）。和原来一样。
+        val page1 = runCatching { catalogs.search(SourceID.KW, artist.name, 1) }.getOrDefault(emptyList())
+        val raw2 = runCatching { searchKwSongs(artist.name, 2) }.getOrDefault(emptyList())
+        val raw3 = runCatching { searchKwSongs(artist.name, 3) }.getOrDefault(emptyList())
+        val songs = (page1 + raw2 + raw3).filter { it.extras["artistId"] == artist.id }.distinctBy { it.id }
         val albumsPage = fetchAlbumsPage(artist, 0, songs)
-        val songsHasMore = (raws.getOrNull(2)?.size ?: 0) >= 30
+        val songsHasMore = raw3.size >= 30
         return ArtistDetail(artist, songs, albumsPage.items, 3, 1, songsHasMore, albumsPage.hasMore)
     }
 
