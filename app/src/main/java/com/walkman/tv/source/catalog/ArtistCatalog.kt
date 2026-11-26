@@ -32,6 +32,13 @@ data class AlbumInfo(
     val detailKey: String = id,
     /** 拉不到完整曲目单的平台（酷我 / 网易）用搜索结果里聚合出来的歌兜底。 */
     val fallbackTracks: List<Track> = emptyList(),
+    /**
+     * 酷狗歌手页的单曲条目（singer/album 里 songcount==1）：酷狗常把单曲和母专辑挂在
+     * 同一个 albumid 下，详情接口回的是母专辑整张或无关现场版；点进去时只保留与专辑
+     * 同名的那一首，歌数才和卡片上的 1 首对得上。搜索页聚合出来的 AlbumInfo 不置这
+     * 个位（聚合的歌数不是“单曲”的证据，不能拿来过滤）。
+     */
+    val isSingle: Boolean = false,
 )
 
 /** 歌手页：热门歌曲 + 专辑列表。 */
@@ -188,13 +195,15 @@ class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
     }.getOrDefault(ArtistDetail(artist, emptyList(), emptyList()))
 
     /**
-     * 专辑完整曲目单。QQ / 酷狗走详情接口；酷我 / 网易目前拉不到（www 500 / 验证码），
-     * 返回空列表，调用方用 [AlbumInfo.fallbackTracks]（搜索结果聚合）兜底。
+     * 专辑完整曲目单。QQ / 酷狗走详情接口；酷我走专辑名搜歌（www 500 / csrf，详情接口
+     * 拉不到）；网易走 /api/album（常回验证码挑战，拉不到时调用方用 fallbackTracks 兜底）。
      */
     suspend fun fetchAlbumDetail(album: AlbumInfo): List<Track> = runCatching {
         when (album.source) {
             SourceID.TX -> QqArtist(http).fetchAlbumDetail(album)
             SourceID.KG -> KugouArtist(http).fetchAlbumDetail(album)
+            SourceID.KW -> KuwoArtist(http, catalogs).fetchAlbumDetail(album)
+            SourceID.WY -> NetEaseArtist(http).fetchAlbumDetail(album)
             else -> emptyList()
         }
     }.getOrDefault(emptyList())
@@ -407,14 +416,18 @@ private class KugouArtist(private val http: CatalogHttp) {
             (0 until arr.length()).mapNotNull { i ->
                 val d = arr.optJSONObject(i) ?: return@mapNotNull null
                 val id = d.opt("albumid")?.toString()?.ifEmpty { null } ?: return@mapNotNull null
+                val count = d.optInt("songcount").takeIf { it > 0 }
                 AlbumInfo(
                     source = SourceID.KG,
                     id = id,
                     name = d.optString("albumname").ifEmpty { return@mapNotNull null },
                     singer = artist.name,
                     picURL = d.optString("imgurl").ifEmpty { null }?.replace("{size}", "240"),
-                    songCount = d.optInt("songcount").takeIf { it > 0 },
+                    songCount = count,
                     detailKey = id,
+                    // songcount==1 的是单曲条目：酷狗常把单曲和母专辑挂在同一个 albumid 下，
+                    // 点进去时详情接口回的是母专辑整张，fetchAlbumDetail 里只保留同名那一首。
+                    isSingle = count == 1,
                 )
             }
         } ?: emptyList()
@@ -426,10 +439,41 @@ private class KugouArtist(private val http: CatalogHttp) {
         val info = runCatching {
             JSONObject(http.getText(url)).optJSONObject("data")?.optJSONArray("info")
         }.getOrNull() ?: return emptyList()
-        return (0 until info.length()).mapNotNull { buildTrack(info.optJSONObject(it), album.singer, album.picURL) }
+        val tracks = (0 until info.length()).mapNotNull { buildTrack(info.optJSONObject(it), album.singer, album.picURL) }
+        if (tracks.isEmpty()) return emptyList()
+        // 单曲条目（卡片上标 1 首）：详情接口常回母专辑整张（英雄 → 周杰伦的床边故事
+        // 10 首）或无关现场版（说好不哭 → 25 首 Live），和卡片上的 1 首对不上。
+        // 只保留与专辑同名的那一首；一首都对不上时再按单曲名搜一次，搜不到就返回空
+        // （调用方显示“暂时拉不到曲目单”，不拿错的歌充数）。
+        if (album.isSingle) {
+            val title = tracks.filter { sameTitle(it.name, album.name) }
+            if (title.isNotEmpty()) return title
+            return searchSingle(album)
+        }
+        return tracks
     }
 
-    /** singer/song、album/song 的条目都没有 songname 字段，歌名在 filename“歌手 - 歌名”里。 */
+    /** 歌名和专辑名是否同一首：去空格、不分大小写，括号里的 feat/with 后缀不计较。 */
+    private fun sameTitle(trackName: String, albumName: String): Boolean {
+        fun norm(s: String) = s.lowercase().filterNot { it.isWhitespace() }
+        fun base(s: String) = norm(s).replace(Regex("\\(.*\\)$"), "")
+        val t = norm(trackName)
+        val a = norm(albumName)
+        return t == a || base(t) == base(a) || t == base(a) || base(t) == a
+    }
+
+    /** 按单曲名搜酷狗，取歌名完全对得上的那一首（说好不哭这种详情接口给错的情况）。 */
+    private suspend fun searchSingle(album: AlbumInfo): List<Track> {
+        val url = "$base/search/song?keyword=${urlEncode(album.name)}&page=1&pagesize=10"
+        val info = runCatching {
+            JSONObject(http.getText(url)).optJSONObject("data")?.optJSONArray("info")
+        }.getOrNull() ?: return emptyList()
+        val tracks = (0 until info.length()).mapNotNull { buildTrack(info.optJSONObject(it), album.singer, album.picURL) }
+        return tracks.filter { sameTitle(it.name, album.name) }.take(1)
+    }
+
+    /** singer/song、album/song 的条目都没有 songname 字段，歌名在 filename“歌手 - 歌名”里。
+     * search/song 的条目两者都有，filename 为空时退到 songname / singername。 */
     private fun buildTrack(d: JSONObject?, singerFallback: String, picURL: String?): Track? {
         d ?: return null
         val hash = d.optString("hash").ifEmpty { return null }
@@ -437,9 +481,10 @@ private class KugouArtist(private val http: CatalogHttp) {
         val filename = d.optString("filename")
         val (singer, name) = if (" - " in filename) {
             val parts = filename.split(" - ", limit = 2)
-            parts[0].ifEmpty { singerFallback } to parts[1].ifEmpty { filename }
+            parts[0].ifEmpty { singerFallback } to parts[1].ifEmpty { d.optString("songname").ifEmpty { filename } }
         } else {
-            singerFallback to filename.ifEmpty { "未知" }
+            d.optString("singername").ifEmpty { singerFallback } to
+                d.optString("songname").ifEmpty { filename.ifEmpty { "未知" } }
         }
         val qs = mutableListOf<Quality>()
         if (d.optLong("filesize") > 0) qs.add(Quality.K128)
@@ -497,22 +542,124 @@ private class KuwoArtist(private val http: CatalogHttp, private val catalogs: Ca
     suspend fun fetchArtistDetail(artist: ArtistInfo): ArtistDetail {
         // 酷我没有歌手详情接口：热门歌 = 按歌手名搜歌再按 ARTISTID 过滤（SearchCatalog 里已把
         // ARTISTID 写进 Track.extras["artistId"]），专辑 = 这些歌按专辑聚合。
-        val hotSongs = runCatching { catalogs.search(SourceID.KW, artist.name, 1) }.getOrDefault(emptyList())
+        // 一页 30 首里每张专辑往往只出现一次，聚合出来的歌数全是 1 首——多拉 3 页再聚合。
+        val page1 = runCatching { catalogs.search(SourceID.KW, artist.name, 1) }.getOrDefault(emptyList())
             .filter { it.extras["artistId"] == artist.id }
-        val albums = groupAlbums(hotSongs).map { g ->
-            AlbumInfo(
-                source = SourceID.KW,
-                id = g.tracks.firstOrNull()?.albumId ?: g.name,
-                name = g.name,
-                singer = artist.name,
-                picURL = g.picURL,
-                songCount = g.tracks.size,
-                detailKey = g.tracks.firstOrNull()?.albumId ?: g.name,
-                fallbackTracks = g.tracks,
-            )
+        val extra = (2..3).flatMap { page ->
+            runCatching { searchKwSongs(artist.name, page) }.getOrDefault(emptyList())
+        }.filter { it.extras["artistId"] == artist.id }
+        val hotSongs = page1
+        val groups = groupAlbums((page1 + extra).distinctBy { it.id })
+        // 每张专辑再按专辑名搜一次拿完整曲目单：卡片上的歌数和点进去的曲目单都以搜到的为准，
+        // 搜不到就保留聚合的结果，不做假数据。搜歌不走 catalogs.search（那会给每首歌补封面，
+        // 每专辑一次就要多 30 次封面请求），直接调 search.kuwo.cn，封面用专辑卡片现成的。
+        val albums = coroutineScope {
+            groups.map { g ->
+                async {
+                    val full = searchAlbumTracks(g.name, artist)
+                    val tracks = full.ifEmpty { g.tracks }
+                    AlbumInfo(
+                        source = SourceID.KW,
+                        id = g.tracks.firstOrNull()?.albumId ?: g.name,
+                        name = g.name,
+                        singer = artist.name,
+                        picURL = g.picURL,
+                        songCount = tracks.size,
+                        detailKey = g.tracks.firstOrNull()?.albumId ?: g.name,
+                        fallbackTracks = tracks,
+                    )
+                }
+            }.awaitAll()
         }
         return ArtistDetail(artist, hotSongs, albums)
     }
+
+    /**
+     * 酷我专辑详情：酷我没有专辑详情接口（www 500 / csrf），按专辑名搜歌，
+     * 只留专辑名和歌手都对得上的；一页 30 首回满了再翻一页。
+     */
+    suspend fun fetchAlbumDetail(album: AlbumInfo): List<Track> {
+        val p1 = runCatching { searchKwSongs(album.name, 1) }.getOrDefault(emptyList())
+        val all = if (p1.size >= 30) {
+            p1 + runCatching { searchKwSongs(album.name, 2) }.getOrDefault(emptyList())
+        } else p1
+        return all.filter {
+            it.albumName?.trim().equals(album.name, ignoreCase = true) &&
+                (it.singer.equals(album.singer, ignoreCase = true) ||
+                    it.singer.contains(album.singer, ignoreCase = true) ||
+                    album.singer.contains(it.singer, ignoreCase = true))
+        }.distinctBy { it.id }
+    }
+
+    /** 按专辑名搜歌拿完整曲目单（给歌手页专辑卡片的歌数和兜底曲目用）。 */
+    private suspend fun searchAlbumTracks(albumName: String, artist: ArtistInfo): List<Track> {
+        val p1 = runCatching { searchKwSongs(albumName, 1) }.getOrDefault(emptyList())
+        val all = if (p1.size >= 30) {
+            p1 + runCatching { searchKwSongs(albumName, 2) }.getOrDefault(emptyList())
+        } else p1
+        return all.filter {
+            it.albumName?.trim().equals(albumName, ignoreCase = true) &&
+                (it.extras["artistId"] == artist.id || it.singer.equals(artist.name, ignoreCase = true))
+        }.distinctBy { it.id }
+    }
+
+    /**
+     * 不带封面补全的酷我歌搜（专辑聚合/专辑详情内部用）。catalogs.search 会给每首歌补
+     * 封面（每首一次请求），聚合和补全时每专辑调一次就够了，不走那条路。
+     * 解析和 SearchCatalog.KuwoSearch.build 同字段（MUSICRID / SONGNAME / ARTIST /
+     * ALBUM / ALBUMID / DURATION / N_MINFO / ARTISTID / MVFLAG）。
+     */
+    private val minfoRegex = Regex("""level:(\w+),bitrate:(\d+),format:(\w+),size:([\w.]+)""")
+
+    private suspend fun searchKwSongs(keyword: String, page: Int): List<Track> {
+        val enc = urlEncode(keyword)
+        val url = "http://search.kuwo.cn/r.s?client=kt&all=$enc&pn=${page - 1}&rn=30&uid=794762570" +
+            "&ver=kwplayer_ar_9.2.2.1&vipver=1&show_copyright_off=1&newver=1&ft=music&cluster=0" +
+            "&strategy=2012&encoding=utf8&rformat=json&vermerge=1&mobi=1&issubtitle=1"
+        val text = runCatching {
+            http.getText(url, mapOf("User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"))
+        }.getOrNull() ?: return emptyList()
+        val abslist = runCatching { JSONObject(text).optJSONArray("abslist") }.getOrNull() ?: return emptyList()
+        return (0 until abslist.length()).mapNotNull { buildKwTrack(abslist.optJSONObject(it)) }
+    }
+
+    private fun buildKwTrack(d: JSONObject?): Track? {
+        d ?: return null
+        val songmid = d.optString("MUSICRID").replace("MUSIC_", "")
+        if (songmid.isEmpty()) return null
+        val qs = mutableListOf<Quality>()
+        d.optString("N_MINFO").split(";").forEach { chunk ->
+            minfoRegex.find(chunk)?.groupValues?.getOrNull(2)?.let { br ->
+                when (br) {
+                    "4000" -> qs.add(Quality.FLAC24)
+                    "2000" -> qs.add(Quality.FLAC)
+                    "320" -> qs.add(Quality.K320)
+                    "128" -> qs.add(Quality.K128)
+                }
+            }
+        }
+        if (qs.isEmpty()) qs.add(Quality.K128)
+        val albumId = decodeKw(d.optString("ALBUMID")).ifEmpty { null }
+        val extras = mutableMapOf<String, String>()
+        // 歌手页热门歌按 ARTISTID 过滤用。
+        d.optString("ARTISTID").ifEmpty { null }?.let { extras["artistId"] = it }
+        if (d.optString("MVFLAG") == "1") extras["mvId"] = songmid
+        return Track(
+            id = Track.makeID(SourceID.KW, songmid),
+            name = decodeKw(d.optString("SONGNAME", "未知")),
+            singer = decodeKw(d.optString("ARTIST")).replace("&", "、").ifEmpty { "未知歌手" },
+            albumName = decodeKw(d.optString("ALBUM")).ifEmpty { null },
+            albumId = albumId,
+            source = SourceID.KW,
+            songmid = songmid,
+            duration = d.optString("DURATION").toIntOrNull(),
+            picURL = null,
+            qualities = qs,
+            extras = extras,
+        )
+    }
+
+    private fun decodeKw(s: String) = s.replace("&nbsp;", " ").replace("&amp;", "&")
 }
 
 // MARK: - NetEase -------------------------------------------------------------------------
@@ -586,14 +733,20 @@ private class NetEaseArtist(private val http: CatalogHttp) {
             (0 until arr.length()).mapNotNull { i ->
                 val d = arr.optJSONObject(i) ?: return@mapNotNull null
                 val id = d.opt("id")?.toString()?.ifEmpty { null } ?: return@mapNotNull null
+                val name = d.optString("name").ifEmpty { return@mapNotNull null }
+                // /api/album 常回验证码挑战，点专辑拉不到完整曲目单；把热门歌里属于这张专辑的
+                // 歌当兜底带上，点进去至少能播这几首，不留空白（卡片上的歌数是 size 真数，不改）。
+                val fb = groupAlbums(hotSongs).firstOrNull { it.name.equals(name, ignoreCase = true) }?.tracks
+                    ?: emptyList()
                 AlbumInfo(
                     source = SourceID.WY,
                     id = id,
-                    name = d.optString("name").ifEmpty { return@mapNotNull null },
+                    name = name,
                     singer = artist.name,
                     picURL = d.optString("picUrl").ifEmpty { null },
                     songCount = d.optInt("size").takeIf { it > 0 },
                     detailKey = id,
+                    fallbackTracks = fb,
                 )
             }
         } ?: emptyList()
