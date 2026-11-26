@@ -55,6 +55,20 @@ class OverlayFocusRestore {
             if (it.isFocused) { focusedKeys.add(key); lastFocusedKey = key } else focusedKeys.remove(key)
         }
 
+    /**
+     * 同步试一次：请求器已经挂在节点上时 requestFocus 立刻生效，onFocusChanged
+     * 同步回调，focusedKeys 里马上能看到。落上返回 true；请求器没挂上
+     * （卡片没组合好）或 key 为空返回 false，不新建请求器（没挂上的建了也没用）。
+     * 左边面板按右先用它同步试最顶上 / 上次那张卡片，落上就吃掉按键；
+     * 同步落不上时调用方再决定是后台重试还是放行。
+     */
+    fun tryFocusSync(key: String?): Boolean {
+        if (key == null) return false
+        val focuser = focusers[key] ?: return false
+        runCatching { focuser.requestFocus() }
+        return key in focusedKeys
+    }
+
     /** 把焦点送到指定的那张卡片上。key 为空就什么都不做。卡片可能还没组合好（数据刚到、网格刚滚回顶部），请求器先建出来再重试：卡片组合时会挂上同一个请求器，之后某次重试就能落上；12 次都落不上就放弃，不抛异常。 */
     suspend fun restoreTo(key: String?) {
         key ?: return

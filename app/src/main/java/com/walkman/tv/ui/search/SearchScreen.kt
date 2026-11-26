@@ -20,11 +20,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -38,6 +41,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -46,9 +50,11 @@ import androidx.tv.material3.Icon
 import com.walkman.tv.data.model.SonglistInfo
 import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
+import com.walkman.tv.di.OverlayEntry
 import com.walkman.tv.source.catalog.AlbumInfo
 import com.walkman.tv.source.catalog.ArtistDetail
 import com.walkman.tv.source.catalog.ArtistInfo
+import com.walkman.tv.source.catalog.CatalogPage
 import com.walkman.tv.di.getLanIp
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.components.AlbumGroup
@@ -609,6 +615,32 @@ fun AlbumDetailOverlay(
     // 被盖住的下层页面上、看着像冻住。空提示下面放一个可聚焦的“返回”，浮层打开就抢焦点。
     val anchorFocus = remember { FocusRequester() }
     var anchorFocused by remember { mutableStateOf(false) }
+    // 当前焦点在曲目单的第几行（入口落位检查用：anchorFocus 经 entryFocuser 挂在第 0 行上）。
+    var focusedRow by remember { mutableStateOf(-1) }
+    val songListState = rememberLazyListState()
+    // 浮层入口：左边面板按右 / 顶栏按下时进浮层里的顶上内容（曲目单第 0 行；曲目单为空时是“返回”）。
+    // 嵌套在歌手页上面时它后登记、在栈顶；关掉注销后栈顶回到歌手页。
+    DisposableEffect(info) {
+        val entry = OverlayEntry(
+            key = "album_${info.source.key}_${info.id}",
+            focuser = anchorFocus,
+            isFocused = { anchorFocused || focusedRow == 0 },
+            retry = {
+                var landed = false
+                for (attempt in 0 until 12) {
+                    if (anchorFocused || focusedRow == 0) { landed = true; break }
+                    // 第 0 行可能还没组合好（列表滚下去了）：先把列表滚回顶部再试。
+                    runCatching { songListState.scrollToItem(0) }
+                    runCatching { anchorFocus.requestFocus() }
+                    delay(70)
+                    if (anchorFocused || focusedRow == 0) { landed = true; break }
+                }
+                landed
+            },
+        )
+        appContainer.events.registerOverlayEntry(entry)
+        onDispose { appContainer.events.unregisterOverlayEntry("album_${info.source.key}_${info.id}") }
+    }
     LaunchedEffect(tracks.isEmpty()) {
         if (tracks.isNotEmpty()) return@LaunchedEffect
         for (attempt in 0 until 20) {
@@ -666,6 +698,9 @@ fun AlbumDetailOverlay(
                     nowPlayingId = nowId,
                     initialFocus = true,
                     trapFocus = true,
+                    onFocusedIndexChange = { focusedRow = it },
+                    listState = songListState,
+                    entryFocuser = anchorFocus,
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
                 )
             }
@@ -692,17 +727,95 @@ fun ArtistDetailOverlay(
     // 专辑区平时占大半屏，热门歌只剩一行半：进歌单深处（第 2 行起）就把专辑区收起来，
     // 歌单占满剩余高度、一次能看五六行；回第 0 行按上时再展开、焦点落回第一张专辑卡片。
     var albumsCollapsed by remember { mutableStateOf(false) }
+    // 全部歌曲 / 全部专辑（Yang 定：热门歌曲那一栏是这个歌手的所有歌曲，能翻到底；
+    // 专辑也一样要他全部专辑）。首屏是 fetchArtistDetail 给的第 0 页，
+    // 往下翻到底自动拉下一页（和歌手浏览页同一套做法）。
+    var songs by remember { mutableStateOf<List<Track>>(emptyList()) }
+    var albums by remember { mutableStateOf<List<AlbumInfo>>(emptyList()) }
+    var songsHasMore by remember { mutableStateOf(true) }
+    var albumsHasMore by remember { mutableStateOf(true) }
+    var songsPage by remember { mutableStateOf(1) }
+    var albumsPage by remember { mutableStateOf(1) }
+    var loadingSongs by remember { mutableStateOf(false) }
+    var loadingAlbums by remember { mutableStateOf(false) }
+    // 当前焦点在歌单的第几行（入口落位检查 + 收起专辑区用）。
+    var focusedRow by remember { mutableStateOf(-1) }
+    val songListState = rememberLazyListState()
+    // LazyRow 和 LazyColumn 共用 LazyListState（没有 rememberLazyRowState 这个函数）。
+    val albumRowState = rememberLazyListState()
     LaunchedEffect(artist) {
         detail = runCatching { appContainer.artists.fetchArtistDetail(artist) }.getOrNull()
+        val d = detail
+        songs = d?.hotSongs ?: emptyList()
+        albums = d?.albums ?: emptyList()
+        songsHasMore = d?.songsHasMore ?: false
+        albumsHasMore = d?.albumsHasMore ?: false
+        songsPage = d?.songsNextPage ?: 1
+        albumsPage = d?.albumsNextPage ?: 1
+        albumsCollapsed = false
+        focusedRow = -1
         loaded = true
     }
+    fun loadSongsPage() {
+        if (loadingSongs || !songsHasMore) return
+        val page = songsPage
+        scope.launch {
+            loadingSongs = true
+            val r = runCatching {
+                appContainer.artists.fetchArtistSongsPage(artist, page, detail?.artist?.picURL)
+            }.getOrDefault(CatalogPage(emptyList(), false))
+            val before = songs.size
+            songs = (songs + r.items).distinctBy { it.id }
+            // 这一页一个新歌都没加上（过滤把整页都筛掉了）：别再自动拉了，不然翻到底会空转。
+            songsHasMore = if (songs.size == before) false else r.hasMore
+            songsPage = page + 1
+            loadingSongs = false
+        }
+    }
+    fun loadAlbumsPage() {
+        if (loadingAlbums || !albumsHasMore) return
+        val page = albumsPage
+        scope.launch {
+            loadingAlbums = true
+            val r = runCatching {
+                appContainer.artists.fetchArtistAlbumsPage(artist, page, songs)
+            }.getOrDefault(CatalogPage(emptyList(), false))
+            val before = albums.size
+            albums = (albums + r.items).distinctBy { it.id }
+            albumsHasMore = if (albums.size == before) false else r.hasMore
+            albumsPage = page + 1
+            loadingAlbums = false
+        }
+    }
+    // 翻到底自动拉下一页。
+    val songsNearEnd by remember {
+        derivedStateOf {
+            val info = songListState.layoutInfo
+            val total = info.totalItemsCount
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 0 && last >= total - 6
+        }
+    }
+    LaunchedEffect(songsNearEnd) { if (songsNearEnd) loadSongsPage() }
+    val albumsNearEnd by remember {
+        derivedStateOf {
+            val info = albumRowState.layoutInfo
+            val total = info.totalItemsCount
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 0 && last >= total - 6
+        }
+    }
+    LaunchedEffect(albumsNearEnd) { if (albumsNearEnd) loadAlbumsPage() }
     // 焦点锚点：浮层自己不抢焦点时（加载中 / 拉不到 / 热门歌为空），页面上没有可聚焦的
     // 东西，遥控器按键会落在被盖住的下层页面上、看着像冻住。锚点保证浮层永远有可聚焦项：
     // 加载中和空提示时是“返回” pill；只有专辑没有热门歌时是第一张专辑卡片；
     // 热门歌在时 TrackList 自己抢初始焦点，不用锚点。
     val anchorFocus = remember { FocusRequester() }
     var anchorFocused by remember { mutableStateOf(false) }
-    val needAnchor = !loaded || detail == null || detail?.hotSongs.isNullOrEmpty()
+    // 入口节点（第一张专辑卡片 / “返回” pill）现在是不是正被聚焦——浮层入口的落位检查用。
+    // 和 anchorFocused 分开：那个是只进不出的 latch（打开时抢焦点用），这个是双向的。
+    var entryFocused by remember { mutableStateOf(false) }
+    val needAnchor = !loaded || detail == null || songs.isEmpty()
     LaunchedEffect(loaded, detail) {
         if (!needAnchor) return@LaunchedEffect
         for (attempt in 0 until 20) {
@@ -710,6 +823,32 @@ fun ArtistDetailOverlay(
             runCatching { anchorFocus.requestFocus() }
             delay(100)
         }
+    }
+    // 浮层入口：左边面板按右 / 顶栏按下时进浮层里的顶上内容。顶上内容是第一张专辑卡片
+    // （anchorFocus 挂在它上面）；专辑区收起来时是歌单第 0 行（anchorFocus 经
+    // TrackList 的 entryFocuser 挂在第 0 行上）；加载中 / 拉不到时是“返回” pill。
+    DisposableEffect(artist) {
+        val entry = OverlayEntry(
+            key = "artist_${artist.source.key}_${artist.id}",
+            focuser = anchorFocus,
+            isFocused = { entryFocused || focusedRow == 0 },
+            retry = {
+                var landed = false
+                for (attempt in 0 until 12) {
+                    if (entryFocused || focusedRow == 0) { landed = true; break }
+                    // 顶上那张卡片可能还没组合好：专辑区开着就把专辑横排滚回头，
+                    // 收起来了就把歌单滚回顶部，再试。
+                    if (albumsCollapsed) runCatching { songListState.scrollToItem(0) }
+                    else runCatching { albumRowState.scrollToItem(0) }
+                    runCatching { anchorFocus.requestFocus() }
+                    delay(70)
+                    if (entryFocused || focusedRow == 0) { landed = true; break }
+                }
+                landed
+            },
+        )
+        appContainer.events.registerOverlayEntry(entry)
+        onDispose { appContainer.events.unregisterOverlayEntry("artist_${artist.source.key}_${artist.id}") }
     }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
@@ -747,7 +886,7 @@ fun ArtistDetailOverlay(
                         modifier = Modifier.align(Alignment.BottomCenter)
                             .padding(bottom = 32.dp)
                             .focusRequester(anchorFocus)
-                            .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                            .onFocusChanged { if (it.isFocused) anchorFocused = true; entryFocused = it.isFocused },
                     ) {
                         Text("返回", fontSize = 14.sp)
                     }
@@ -763,20 +902,20 @@ fun ArtistDetailOverlay(
                         onClick = onBack,
                         modifier = Modifier
                             .focusRequester(anchorFocus)
-                            .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                            .onFocusChanged { if (it.isFocused) anchorFocused = true; entryFocused = it.isFocused },
                     ) {
                         Text("返回", fontSize = 14.sp)
                     }
                 }
                 else -> {
-                    val d = detail!!
-                    if (!albumsCollapsed && d.albums.isNotEmpty()) {
-                        SectionHeader("专辑 (${d.albums.size})")
+                    if (!albumsCollapsed && albums.isNotEmpty()) {
+                        SectionHeader("专辑 (${albums.size})")
                         LazyRow(
+                            state = albumRowState,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
-                            itemsIndexed(d.albums, key = { _, it -> "${it.source.key}_${it.id}" }) { index, album ->
+                            itemsIndexed(albums, key = { _, it -> "${it.source.key}_${it.id}" }) { index, album ->
                                 val albumKey = "${album.source.key}_${album.id}"
                                 Box(modifier = Modifier.width(140.dp)) {
                                     MediaCard(
@@ -786,7 +925,7 @@ fun ArtistDetailOverlay(
                                         modifier = albumRestore.modifierFor(albumKey)
                                             .then(if (index == 0) Modifier
                                                 .focusRequester(anchorFocus)
-                                                .onFocusChanged { if (it.isFocused) anchorFocused = true }
+                                                .onFocusChanged { if (it.isFocused) anchorFocused = true; entryFocused = it.isFocused }
                                             else Modifier),
                                         onClick = { albumEntryKey = albumKey; openAlbum = album },
                                     )
@@ -795,30 +934,48 @@ fun ArtistDetailOverlay(
                         }
                         Spacer(Modifier.padding(top = 8.dp))
                     }
-                    if (d.hotSongs.isNotEmpty()) {
-                        SectionHeader("热门歌曲 (${d.hotSongs.size})")
+                    if (songs.isNotEmpty()) {
+                        SectionHeader("全部歌曲 (${songs.size})")
                         val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
-                        TrackList(
-                            tracks = d.hotSongs,
-                            modifier = Modifier.fillMaxWidth().weight(1f),
-                            nowPlayingId = nowId,
-                            initialFocus = true,
-                            trapFocus = true,
-                            onFocusedIndexChange = { if (it >= 1) albumsCollapsed = true },
-                            onExitUp = {
-                                // 回专辑行：先把专辑区展开，等卡片组合好再把焦点落到第一张专辑卡片上。
-                                albumsCollapsed = false
-                                scope.launch {
-                                    repeat(10) {
-                                        runCatching { anchorFocus.requestFocus() }
-                                        if (anchorFocused) return@launch
-                                        delay(100)
+                        Column(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                            TrackList(
+                                tracks = songs,
+                                modifier = Modifier.fillMaxWidth().weight(1f),
+                                nowPlayingId = nowId,
+                                initialFocus = true,
+                                trapFocus = true,
+                                onFocusedIndexChange = { focusedRow = it; if (it >= 1) albumsCollapsed = true },
+                                onExitUp = {
+                                    // 回专辑行：先把专辑区展开，等卡片组合好再把焦点落到第一张专辑卡片上。
+                                    albumsCollapsed = false
+                                    scope.launch {
+                                        repeat(10) {
+                                            runCatching { anchorFocus.requestFocus() }
+                                            if (anchorFocused) return@launch
+                                            delay(100)
+                                        }
                                     }
-                                }
-                            },
-                            onPlay = { idx -> playList(d.hotSongs, idx); onOpenPlayer() },
-                        )
-                    } else if (d.albums.isEmpty()) {
+                                },
+                                listState = songListState,
+                                entryFocuser = anchorFocus,
+                                onPlay = { idx -> playList(songs, idx); onOpenPlayer() },
+                            )
+                            val footer = when {
+                                loadingSongs -> "正在加载更多…"
+                                !songsHasMore -> "已显示全部 ${songs.size} 首"
+                                else -> ""
+                            }
+                            if (footer.isNotEmpty()) {
+                                Text(
+                                    footer,
+                                    color = AppColors.TextMuted,
+                                    fontSize = 12.sp,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                )
+                            }
+                        }
+                    } else if (albums.isEmpty()) {
                         Column(
                             modifier = Modifier.fillMaxSize(),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -830,7 +987,7 @@ fun ArtistDetailOverlay(
                                 onClick = onBack,
                                 modifier = Modifier
                                     .focusRequester(anchorFocus)
-                                    .onFocusChanged { if (it.isFocused) anchorFocused = true },
+                                    .onFocusChanged { if (it.isFocused) anchorFocused = true; entryFocused = it.isFocused },
                             ) {
                                 Text("返回", fontSize = 14.sp)
                             }

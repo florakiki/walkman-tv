@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -33,6 +34,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
+import com.walkman.tv.di.OverlayEntry
 import com.walkman.tv.source.catalog.ArtistInfo
 import com.walkman.tv.source.catalog.SingerRegion
 import com.walkman.tv.ui.appContainer
@@ -119,6 +121,27 @@ fun SingerBrowseOverlay(
             runCatching { firstTabFocus.requestFocus() }
             delay(100)
         }
+    }
+    // 浮层入口：左边面板按右 / 顶栏按下时进浮层里的顶上内容（地区 tab 第一项“全部”）。
+    // 上面盖着歌手页时歌手页后登记、在栈顶；歌手页关掉注销后栈顶回到浏览页。
+    DisposableEffect(Unit) {
+        val entry = OverlayEntry(
+            key = "browseSingers",
+            focuser = firstTabFocus,
+            isFocused = { tabFocused },
+            retry = {
+                var landed = false
+                for (attempt in 0 until 12) {
+                    if (tabFocused) { landed = true; break }
+                    runCatching { firstTabFocus.requestFocus() }
+                    delay(70)
+                    if (tabFocused) { landed = true; break }
+                }
+                landed
+            },
+        )
+        appContainer.events.registerOverlayEntry(entry)
+        onDispose { appContainer.events.unregisterOverlayEntry("browseSingers") }
     }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {

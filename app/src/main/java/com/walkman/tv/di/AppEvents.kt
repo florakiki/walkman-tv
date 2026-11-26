@@ -1,9 +1,29 @@
 package com.walkman.tv.di
 
+import androidx.compose.ui.focus.FocusRequester
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+
+/**
+ * 开着的浮层登记的“顶上内容”焦点入口：左边面板按右、顶栏按下时，先看栈顶——
+ * 有浮层开着就进浮层里的内容（歌手页第一张专辑卡片 / 热门歌曲第 0 行 / 歌单第 0 行 …），
+ * 不去碰被盖住的首页网格（那张卡片在浮层下面，焦点落上去用户也看不见，
+ * 看着就是“按右没反应”——2026-11-26 陈奕迅歌手页开着时，焦点在暂停键上按右就是这么卡住的）。
+ *
+ * 主线程用；浮层用 DisposableEffect 登记/注销，嵌套浮层后登记者在栈顶
+ * （专辑详情盖在歌手页上面时，栈顶是专辑详情；它关掉注销后，栈顶回到歌手页）。
+ */
+class OverlayEntry(
+    val key: String,
+    /** 顶上内容的焦点请求器（浮层在屏幕上，节点一般已组合好，同步请求一次就能落上）。 */
+    val focuser: FocusRequester,
+    /** 是不是已经落上焦点（浮层自己用 onFocusChanged 维护）。 */
+    val isFocused: () -> Boolean,
+    /** 同步没落上时的异步重试（顶上内容还没组合好时先滚回顶部再试），返回是不是落上了。 */
+    val retry: (suspend () -> Boolean)? = null,
+)
 
 /**
  * Process-wide event bus. [MainActivity] forwards hardware-key presses that need to cross the
@@ -60,6 +80,15 @@ class AppEvents {
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     val playerClosed: SharedFlow<Unit> = _playerClosed.asSharedFlow()
+
+    private val overlayEntries = mutableListOf<OverlayEntry>()
+    fun registerOverlayEntry(entry: OverlayEntry) {
+        overlayEntries.removeAll { it.key == entry.key }
+        overlayEntries.add(entry)
+    }
+    fun unregisterOverlayEntry(key: String) { overlayEntries.removeAll { it.key == key } }
+    /** 最上层开着的浮层的入口（没有浮层开着就是 null）。 */
+    val topOverlayEntry: OverlayEntry? get() = overlayEntries.lastOrNull()
 
     fun postMenuKey() { _menuKey.tryEmit(Unit) }
     fun postQrSearchKeyword(q: String) { _qrSearchKeyword.tryEmit(q) }

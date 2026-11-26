@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -260,6 +261,12 @@ fun TrackList(
     onExitUp: (() -> Unit)? = null,
     /** 焦点行变化时回调（歌手页用它在进歌单深处时收起专辑区）。 */
     onFocusedIndexChange: ((Int) -> Unit)? = null,
+    /** 外面传进来的列表滚动状态（不传就自己建一个）：歌手页翻页时外面要看滚到哪了，
+     *  浮层入口重试时外面要把列表滚回顶部。 */
+    listState: LazyListState? = null,
+    /** 浮层入口用的请求器：挂在第 0 行上。左边面板按右 / 顶栏按下时，
+     *  浮层通过它把焦点送到列表最上面那一行。 */
+    entryFocuser: FocusRequester? = null,
     onPlay: (index: Int) -> Unit,
 ) {
     // Collect once here (shared StateFlows) and derive the set of tracks that are downloaded AND
@@ -275,7 +282,7 @@ fun TrackList(
             .filter { it !in missing }
             .toSet()
     }
-    val listState = rememberLazyListState()
+    val listState = listState ?: rememberLazyListState()
     // One FocusRequester per row, stable across recompositions: explicit Up/Down handling
     // below moves focus through these, so navigation never depends on Compose's spatial
     // focus search alone — that search is what left focus wandering to the TopNav instead
@@ -284,10 +291,14 @@ fun TrackList(
     // 旧步进对没组合出来的行直接请求焦点。修法见下面的 stepFocus：目标行不在屏幕上时，
     // 先把列表滚过去、等行组合好再聚焦，失败有兜底，绝不对没显示的行直接请求焦点。
     // 列表换了就重建整张表，不留指着已拆掉的行的旧 FocusRequester。
-    val rowFocusers = remember(tracks) { mutableMapOf<Int, FocusRequester>() }
+    // 注意：翻页是往后追加（首首歌不变），不能按整个 tracks 记——追加会把整张表和
+    // focusedIndex 都重置，焦点就从正在看的那一行丢了。按首首歌的 id 记：
+    // 追加时首首不变、表和焦点行都不动；换了一份新列表（首首不同）时才重建。
+    val listIdentity = tracks.firstOrNull()?.id
+    val rowFocusers = remember(listIdentity) { mutableMapOf<Int, FocusRequester>() }
     val focuserFor: (Int) -> FocusRequester = { rowFocusers.getOrPut(it) { FocusRequester() } }
     // Index of the row that currently holds focus (-1 = focus is outside the list).
-    var focusedIndex by remember(tracks) { androidx.compose.runtime.mutableStateOf(-1) }
+    var focusedIndex by remember(listIdentity) { androidx.compose.runtime.mutableStateOf(-1) }
     // 每次滚动步进的目标行：快速连按时，旧的滚动协程看到目标变了就自己停，别把焦点拽回旧行。
     var stepTarget by remember { androidx.compose.runtime.mutableStateOf(-1) }
     // Holds the index of the row most recently clicked-to-play. When the player overlay
@@ -419,6 +430,9 @@ fun TrackList(
             // explicit Up/Down handler above uses it to step row by row.
             val rowModifier = Modifier
                 .focusRequester(focuserFor(index))
+                // 浮层入口请求器挂在第 0 行上（和本行自己的请求器并存，一行可以挂多个，
+                // 和歌手页第一张专辑卡片上 anchorFocus + albumRestore 并存一个道理）。
+                .then(if (index == 0 && entryFocuser != null) Modifier.focusRequester(entryFocuser) else Modifier)
                 .onFocusChanged {
                     if (it.isFocused) {
                         focusedIndex = index

@@ -23,20 +23,33 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.walkman.tv.ui.components.TvPill
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.activity.ComponentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.tv.material3.Text
 import com.walkman.tv.ui.components.TopNav
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import com.walkman.tv.ui.leaderboard.LeaderboardScreen
 import com.walkman.tv.ui.library.LibraryScreen
 import com.walkman.tv.ui.player.PlayerScreen
@@ -54,6 +67,37 @@ fun RootScreen(modifier: Modifier = Modifier) {
     var showExitDialog by remember { mutableStateOf(false) }
     val recommendFocus = remember { FocusRequester() }
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // 回到前台时清掉浮层状态、落回首页（2026-11-26，Yang 问“刚进 app 怎么先显示旧的
+    // 页面、然后再显示歌手这页，是不是底层没有清理干净”）。查到的结论：导航 / 浮层
+    // 状态只存在内存里（plain remember，没存盘、没有恢复逻辑），真冷启动一定是首页；
+    // 歌手页能回来，只可能是按 Home 离开、进程还活着，系统把原任务顶回来——浮层
+    // 还在内存里，不是什么没清理干净，是系统本来就会恢复到离开时的页面。
+    // 按 Yang 的意思改：进 App 直接是首页，不留上次的浮层。只在“从后台回来”时清，
+    // 第一次启动不触发；退出框点确定是杀进程，冷启动本来就是首页。播放不受影响
+    // （播放器在 AppContainer 里，不跟着界面走）。
+    val activity = LocalContext.current as? ComponentActivity
+    var resetKey by remember { mutableIntStateOf(0) }
+    DisposableEffect(activity) {
+        if (activity == null) return@DisposableEffect onDispose {}
+        var wentBackground = false
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_STOP -> wentBackground = true
+                Lifecycle.Event.ON_START -> if (wentBackground) {
+                    wentBackground = false
+                    section = NavSection.Recommend
+                    showPlayer = false
+                    showExitDialog = false
+                    resetKey++
+                }
+                else -> {}
+            }
+        }
+        activity.lifecycle.addObserver(observer)
+        onDispose { activity.lifecycle.removeObserver(observer) }
+    }
 
     // Subscribe only to the bits the TopNav cares about — without distinctUntilChanged the 1Hz
     // position ticker would recompose the whole root and TopNav once per second.
@@ -93,28 +137,49 @@ fun RootScreen(modifier: Modifier = Modifier) {
 
     Box(modifier = modifier) {
         Column(Modifier.fillMaxSize()) {
-            TopNav(
-                active = section,
-                onSelect = { section = it },
-                recommendFocusRequester = recommendFocus,
-                nowPlayingTitle = navBits.title,
-                nowPlayingPicURL = navBits.picURL,
-                nowPlayingIsPlaying = navBits.isPlaying,
-                onOpenPlayer = { showPlayer = true },
-            )
+            // 顶栏按下：浮层开着时（歌手页等）落到这一页最上面那一行（歌手页第一张专辑卡片），
+            // 不是 focusRestorer 记住的最底下那一行（2026-11-26：歌手页往上到顶栏、
+            // 再按下来落在热门歌曲列表最底下一行——空间搜索从顶栏下来先挑到满宽的歌单行，
+            // focusRestorer 再把它送回上次那行）。没浮层时走原来的空间搜索
+            // （首页网格顶行就在顶栏下面，落点本来就是对的）。
+            Box(
+                Modifier.onPreviewKeyEvent { e ->
+                    if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    if (e.key != Key.DirectionDown) return@onPreviewKeyEvent false
+                    val entry = appContainer.events.topOverlayEntry ?: return@onPreviewKeyEvent false
+                    runCatching { entry.focuser.requestFocus() }
+                    if (entry.isFocused()) return@onPreviewKeyEvent true
+                    scope.launch { entry.retry?.invoke() }
+                    true
+                },
+            ) {
+                TopNav(
+                    active = section,
+                    onSelect = { section = it },
+                    recommendFocusRequester = recommendFocus,
+                    nowPlayingTitle = navBits.title,
+                    nowPlayingPicURL = navBits.picURL,
+                    nowPlayingIsPlaying = navBits.isPlaying,
+                    onOpenPlayer = { showPlayer = true },
+                )
+            }
             // weight(1f) — NOT fillMaxSize. fillMaxSize on a Column child requests the column's
             // *total* height (ignoring siblings), so the bottom of this Box was being pushed
             // past the screen by ~TopNav height and content there was clipped. weight gives
             // exactly the remaining space after TopNav, which is what we actually want.
-            Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 18.dp)) {
-                val openPlayer = { showPlayer = true }
-                when (section) {
-                    NavSection.Recommend -> RecommendScreen(onNavigate = { section = it }, onOpenPlayer = openPlayer)
-                    NavSection.Search -> SearchScreen(onOpenPlayer = openPlayer)
-                    NavSection.Leaderboard -> LeaderboardScreen(onOpenPlayer = openPlayer)
-                    NavSection.Songlist -> SonglistScreen(onOpenPlayer = openPlayer)
-                    NavSection.Library -> LibraryScreen(onOpenPlayer = openPlayer)
-                    NavSection.Settings -> SettingsScreen()
+            // key(resetKey)：回到前台时整个内容区重建，浮层 / 滚动位置 / 各页内部状态
+            // 全部回到初始值，落回首页（上面那个生命周期观察者会把 resetKey 加一）。
+            key(resetKey) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 18.dp)) {
+                    val openPlayer = { showPlayer = true }
+                    when (section) {
+                        NavSection.Recommend -> RecommendScreen(onNavigate = { section = it }, onOpenPlayer = openPlayer)
+                        NavSection.Search -> SearchScreen(onOpenPlayer = openPlayer)
+                        NavSection.Leaderboard -> LeaderboardScreen(onOpenPlayer = openPlayer)
+                        NavSection.Songlist -> SonglistScreen(onOpenPlayer = openPlayer)
+                        NavSection.Library -> LibraryScreen(onOpenPlayer = openPlayer)
+                        NavSection.Settings -> SettingsScreen()
+                    }
                 }
             }
         }

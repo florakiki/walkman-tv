@@ -125,20 +125,43 @@ private fun NowPlayingPanel(
   Column(
     // 从左边面板按右，一定要能进到右边内容区去：圆钮在屏幕最底下一排，空间焦点搜索
     // 跨不过右边网格那层 focusGroup（要落的卡片在上面几行、根本不在圆钮那条横线上），
-    // 按右就卡在推荐页动不了。这里显式传焦点，不走空间搜索；按键吃掉，不再往下漏。
-    // 落点是右边内容最顶上那张卡片（Yang 定：落最顶上，不是落上次那张）——先把网格
-    // 滚回顶部（最顶上那张可能滚出屏幕外还没组合好），再由 restoreTo 重试到落上为止。
-    // 最顶上那张还没排出来（数据没到）时回落到上次那张卡片，再没有就放行走空间搜索。
+    // 按右就卡在推荐页动不了。这里显式传焦点，不走空间搜索。
+    // 落点分两种（Yang 定）：浮层开着时进浮层里的顶上内容（歌手页第一张专辑卡片 /
+    // 热门歌曲第 0 行 / 歌单第 0 行 …），不去碰被盖住的首页网格——旧代码只认首页网格
+    // 最顶上那张卡片，焦点落到浮层下面、用户看不见，看着就是“按右没反应”（2026-11-26
+    // 陈奕迅歌手页开着、焦点在暂停键上按右就是这么卡住的；按左没被拦、走空间搜索能回
+    // 圆钮，所以左行右不行）。没浮层时落右边内容最顶上那张卡片（落最顶上，不是落上次那张）。
+    // 按键吃掉的前提是焦点真的送出去了：先同步试一次（卡片在屏幕上时立刻生效、当场验落位），
+    // 落上就吃掉；同步落不上时后台重试到落上为止（网格滚回顶部再试），绝不出现
+    // “按键吃掉了、焦点原地不动”；只有根本没有目标时才放行走空间搜索。
     // 封面和三个圆钮都在这个 Column 里，按右都走这一条。
     modifier = modifier.padding(start = 0.dp, end = 8.dp)
       .onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
         if (e.key != Key.DirectionRight) return@onPreviewKeyEvent false
+        // 1. 浮层开着 → 进浮层里的顶上内容。
+        val entry = appContainer.events.topOverlayEntry
+        if (entry != null) {
+          runCatching { entry.focuser.requestFocus() }
+          if (entry.isFocused()) return@onPreviewKeyEvent true
+          // 顶上内容还没组合好（歌单滚下去了、第 0 行不在屏幕上）：后台重试到落上为止。
+          // 浮层在屏幕上，重试一定能落上；按键吃掉，不再往下漏。
+          scope.launch { entry.retry?.invoke() }
+          return@onPreviewKeyEvent true
+        }
+        // 2. 没浮层 → 同步试最顶上那张卡片，再试上次那张卡片。
+        if (restore.tryFocusSync(restore.topCardKey)) return@onPreviewKeyEvent true
+        if (restore.tryFocusSync(restore.lastFocusedKey)) return@onPreviewKeyEvent true
+        // 3. 同步都落不上：不是没有目标，是目标卡片还没组合好（网格滚下去了、最顶上
+        //    那张在屏幕外）。空间搜索进不了网格那层 focusGroup，放行等于没反应，
+        //    所以还是吃掉按键、后台把网格滚回顶部再重试到落上为止。
+        //    只有根本没有目标（topCardKey 和 lastFocusedKey 都是空）时才放行。
         val topKey = restore.topCardKey
         val key = topKey ?: restore.lastFocusedKey ?: return@onPreviewKeyEvent false
         scope.launch {
           if (topKey != null) onScrollGridToTop()
           restore.restoreTo(key)
+          if (topKey != null) restore.restoreTo(restore.lastFocusedKey)
         }
         true
       },
