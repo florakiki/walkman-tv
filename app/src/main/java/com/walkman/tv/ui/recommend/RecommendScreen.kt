@@ -14,6 +14,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -76,26 +78,36 @@ fun RecommendScreen(
   // 优化：左侧面板总宽度精调为屏幕高度的 55%
   val panelDynamicWidth = screenHeight * 0.55f
 
+  // 左右两块共用同一张焦点表：面板按右要送回网格里上次那张卡片，网格初始焦点和浮层
+  // 关掉后的恢复也走这张表，落的是同一批卡片。
+  val restore = rememberOverlayFocusRestore()
   Row(modifier = modifier.fillMaxSize().padding(vertical = 8.dp)) {
     NowPlayingPanel(
       onOpenPlayer = onOpenPlayer,
+      restore = restore,
       modifier = Modifier.width(panelDynamicWidth).fillMaxHeight()
     )
     Spacer(Modifier.width(16.dp))
     RecommendGrid(
       onNavigate = onNavigate,
       onOpenPlayer = onOpenPlayer,
+      restore = restore,
       modifier = Modifier.weight(1f).fillMaxHeight(),
     )
   }
 }
 
 @Composable
-private fun NowPlayingPanel(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
+private fun NowPlayingPanel(
+  onOpenPlayer: () -> Unit,
+  restore: com.walkman.tv.ui.components.OverlayFocusRestore,
+  modifier: Modifier = Modifier,
+) {
   val controller = appContainer.playbackController
   val state by controller.state.collectAsState()
   val lyrics by controller.lyrics.collectAsState()
   val track = state.currentTrack
+  val scope = androidx.compose.runtime.rememberCoroutineScope()
 
   val configuration = androidx.compose.ui.platform.LocalConfiguration.current
   val screenHeight = configuration.screenHeightDp.dp
@@ -104,7 +116,19 @@ private fun NowPlayingPanel(onOpenPlayer: () -> Unit, modifier: Modifier = Modif
   val coverDynamicSize = screenHeight * 0.46f
 
   Column(
-    modifier = modifier.padding(start = 0.dp, end = 8.dp),
+    // 从左边面板按右，一定要能进到右边内容区去：圆钮在屏幕最底下一排，空间焦点搜索
+    // 跨不过右边网格那层 focusGroup（要落的卡片在上面几行、根本不在圆钮那条横线上），
+    // 按右就卡在推荐页动不了。这里显式把焦点送回网格里上次那张卡片（restoreTo 自带
+    // 12 次×70ms 重试），不走空间搜索；按键吃掉，不再往下漏。封面和三个圆钮都在这
+    // 个 Column 里，按右都走这一条。
+    modifier = modifier.padding(start = 0.dp, end = 8.dp)
+      .onPreviewKeyEvent { e ->
+        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+        if (e.key != Key.DirectionRight) return@onPreviewKeyEvent false
+        val key = restore.lastFocusedKey ?: return@onPreviewKeyEvent false
+        scope.launch { restore.restoreTo(key) }
+        true
+      },
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.Center // 保持纵向绝对居中，留白非常匀称
   ) {
@@ -225,6 +249,7 @@ private data class DetailView(val title: String, val subtitle: String?, val trac
 private fun RecommendGrid(
   onNavigate: (NavSection) -> Unit,
   onOpenPlayer: () -> Unit,
+  restore: com.walkman.tv.ui.components.OverlayFocusRestore,
   modifier: Modifier = Modifier,
 ) {
   val settings by appContainer.settingsStore.settings.collectAsState()
@@ -244,7 +269,7 @@ private fun RecommendGrid(
   }
   // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上（不是回首页）：浮层关掉时
   // 焦点是被整个清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
-  val restore = rememberOverlayFocusRestore()
+  // restore 是 RecommendScreen 传下来的、左右两块共用的那张表（面板按右回网格也走它）。
   var detailEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
   var artistEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
   var browseEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }

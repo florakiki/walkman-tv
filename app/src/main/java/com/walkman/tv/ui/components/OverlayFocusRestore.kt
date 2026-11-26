@@ -36,6 +36,9 @@ import kotlinx.coroutines.delay
 class OverlayFocusRestore {
     private val focusers = mutableMapOf<String, FocusRequester>()
     private val focusedKeys = mutableSetOf<String>()
+    /** 最近一次落上焦点的卡片 key（没有就是 null）。左边面板按右回网格时用它当目标。 */
+    var lastFocusedKey: String? = null
+        private set
 
     /** 拿一张卡片的 FocusRequester（同一张卡片每次拿的是同一个）。 */
     fun focuserFor(key: String): FocusRequester = focusers.getOrPut(key) { FocusRequester() }
@@ -47,7 +50,7 @@ class OverlayFocusRestore {
     fun modifierFor(key: String): Modifier = Modifier
         .focusRequester(focuserFor(key))
         .onFocusChanged {
-            if (it.isFocused) focusedKeys.add(key) else focusedKeys.remove(key)
+            if (it.isFocused) { focusedKeys.add(key); lastFocusedKey = key } else focusedKeys.remove(key)
         }
 
     /** 把焦点送回指定的那张卡片上。key 为空、或卡片已经不在了，就什么都不做。 */
