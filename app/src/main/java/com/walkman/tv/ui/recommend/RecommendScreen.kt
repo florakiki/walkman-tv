@@ -11,7 +11,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.onFocusChanged
@@ -59,6 +58,7 @@ import com.walkman.tv.playback.LyricParser
 import com.walkman.tv.ui.NavSection
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.components.Artwork
+import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TvFocusable
 import com.walkman.tv.ui.components.TvPill
 import com.walkman.tv.ui.theme.AppColors
@@ -242,15 +242,38 @@ private fun RecommendGrid(
       appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 12)
     }.getOrDefault(emptyList())
   }
+  // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上（不是回首页）：浮层关掉时
+  // 焦点是被整个清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
+  val restore = rememberOverlayFocusRestore()
+  var detailEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+  var artistEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+  var browseEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+  androidx.compose.runtime.LaunchedEffect(detail) { if (detail == null) restore.restoreTo(detailEntryKey) }
+  // 从歌手浏览页点歌手进的歌手页，关掉时由浏览页自己把焦点送回浏览页里的那张卡片，
+  // 推荐页这层不抢（不然两边同时抢，焦点可能落在被盖住的推荐页卡片上）。
+  var artistFromBrowse by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+  androidx.compose.runtime.LaunchedEffect(openArtist) {
+    if (openArtist == null && !artistFromBrowse) restore.restoreTo(artistEntryKey)
+  }
+  androidx.compose.runtime.LaunchedEffect(browseSingers) { if (!browseSingers) restore.restoreTo(browseEntryKey) }
   // 首页打开时焦点落在最上面那张卡片上（现在是歌手区第一张，没有歌手时是推荐歌单第一张）。
   // 数据是异步拉的，首张卡片可能还没排好版，重试到焦点真正落进网格里为止；焦点已经在
   // 网格里时就停，不把用户已移走的焦点拽回来。
-  val firstCardFocus = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+  // 首张卡片的 FocusRequester 和“记住入口卡片”共用同一张表（restore.focuserFor），
+  // 初始焦点和浮层关掉后的恢复落的是同一批卡片。
   var gridFocused by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
   androidx.compose.runtime.LaunchedEffect(hotSingers, home) {
+    val firstKey: String? = when {
+      hotSingers.isNotEmpty() -> "singer_${hotSingers[0].source.key}_${hotSingers[0].id}"
+      home.heroes.isNotEmpty() -> "songlist_${home.heroes[0].songlist.source.key}_${home.heroes[0].songlist.id}"
+      home.recommendations.isNotEmpty() -> "songlist_${home.recommendations[0].source.key}_${home.recommendations[0].id}"
+      else -> null
+    }
+    val target = firstKey?.let { restore.focuserFor(it) }
     for (attempt in 0 until 20) {
       if (gridFocused) break
-      runCatching { firstCardFocus.requestFocus() }
+      if (target == null) break
+      runCatching { target.requestFocus() }
       delay(100)
     }
   }
@@ -307,7 +330,12 @@ private fun RecommendGrid(
           // 歌手入口放最顶部：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
           if (hotSingers.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
-              SectionHeader("歌手", null, trailing = "查看全部") {
+              SectionHeader(
+                "歌手", null,
+                trailing = "查看全部",
+                trailingModifier = restore.modifierFor("browse_all"),
+              ) {
+                browseEntryKey = "browse_all"
                 browseSingers = true
               }
             }
@@ -318,10 +346,11 @@ private fun RecommendGrid(
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
               ) {
                 itemsIndexed(hotSingers, key = { _, it -> "${it.source.key}_${it.id}" }) { index, artist ->
+                  val singerKey = "singer_${artist.source.key}_${artist.id}"
                   com.walkman.tv.ui.search.ArtistCard(
                     artist = artist,
-                    onClick = { openArtist = artist },
-                    focusRequester = if (index == 0) firstCardFocus else null,
+                    onClick = { artistFromBrowse = false; artistEntryKey = singerKey; openArtist = artist },
+                    modifier = restore.modifierFor(singerKey),
                   )
                 }
               }
@@ -338,12 +367,14 @@ private fun RecommendGrid(
               home.boards.distinctBy { "${it.source.key}_${it.id}" },
               key = { "${it.source.key}_${it.id}" },
             ) { board ->
+              val boardKey = "board_${board.source.key}_${board.id}"
               GridAlbumCard(
                 picURL = board.picURL,
                 title = board.name,
                 subtitle = null,
                 fallbackTint = board.source.tintColor(),
-                onClick = { openBoard(board) },
+                modifier = restore.modifierFor(boardKey),
+                onClick = { detailEntryKey = boardKey; openBoard(board) },
               )
             }
           }
@@ -358,13 +389,14 @@ private fun RecommendGrid(
               songlists.distinctBy { "${it.source.key}_${it.id}" },
               key = { _, info -> "${info.source.key}_${info.id}" },
             ) { index, info ->
+              val songlistKey = "songlist_${info.source.key}_${info.id}"
               GridAlbumCard(
                 picURL = info.picURL,
                 title = info.name,
                 subtitle = info.playCount?.let { "▶ $it" },
                 fallbackTint = info.source.tintColor(),
-                focusRequester = if (index == 0 && hotSingers.isEmpty()) firstCardFocus else null,
-                onClick = { openSonglist(info) },
+                modifier = restore.modifierFor(songlistKey),
+                onClick = { detailEntryKey = songlistKey; openSonglist(info) },
               )
             }
           }
@@ -384,7 +416,8 @@ private fun RecommendGrid(
     if (browseSingers) {
       SingerBrowseOverlay(
         onBack = { browseSingers = false },
-        onOpenArtist = { openArtist = it },
+        onOpenArtist = { artistFromBrowse = true; openArtist = it },
+        artistOpen = openArtist != null,
       )
     }
     openArtist?.let { artist ->
@@ -463,6 +496,9 @@ private fun SectionHeader(
   title: String,
   subtitle: String?,
   trailing: String?,
+  // 放在 onTrailingClick 前面：Kotlin 的尾随 lambda 只能绑最后一个参数，
+  // onTrailingClick 必须留在最后，不然外面那几处尾随 lambda 全绑错。
+  trailingModifier: Modifier = Modifier,
   onTrailingClick: () -> Unit,
 ) {
   Row(
@@ -483,6 +519,7 @@ private fun SectionHeader(
     if (!trailing.isNullOrBlank()) {
       TvPill(
         onClick = onTrailingClick,
+        modifier = trailingModifier,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 6.dp),
       ) {
         Text(trailing, fontSize = 12.sp)
@@ -551,7 +588,7 @@ private fun GridAlbumCard(
   subtitle: String?,
   fallbackTint: Color,
   onClick: () -> Unit,
-  focusRequester: androidx.compose.ui.focus.FocusRequester? = null,
+  modifier: Modifier = Modifier,
 ) {
   Column(modifier = Modifier.fillMaxWidth()) {
     TvFocusable(
@@ -559,7 +596,7 @@ private fun GridAlbumCard(
       modifier = Modifier
         .fillMaxWidth()
         .aspectRatio(1f)
-        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+        .then(modifier),
       shape = RoundedCornerShape(12.dp),
     ) {
       Box(modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp))) {

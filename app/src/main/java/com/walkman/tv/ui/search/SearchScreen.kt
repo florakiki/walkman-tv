@@ -56,6 +56,7 @@ import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.MediaCard
 import com.walkman.tv.ui.components.QrDialog
+import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TrackList
 import com.walkman.tv.ui.components.TracksDetailOverlay
 import com.walkman.tv.ui.components.TvPill
@@ -282,8 +283,15 @@ private fun ResultsPane(
     var albumDetail by remember { mutableStateOf<AlbumGroup?>(null) }
     // 打开的歌手页（浮层：头像 + 热门歌 + 专辑）。
     var artistDetail by remember { mutableStateOf<ArtistInfo?>(null) }
-    LaunchedEffect(tracks) { albumDetail = null }
-    LaunchedEffect(artists) { artistDetail = null }
+    // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上：浮层关掉时焦点是被整个
+    // 清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
+    val restore = rememberOverlayFocusRestore()
+    var albumEntryKey by remember { mutableStateOf<String?>(null) }
+    var artistEntryKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(albumDetail) { if (albumDetail == null) restore.restoreTo(albumEntryKey) }
+    LaunchedEffect(artistDetail) { if (artistDetail == null) restore.restoreTo(artistEntryKey) }
+    LaunchedEffect(tracks) { albumDetail = null; albumEntryKey = null }
+    LaunchedEffect(artists) { artistDetail = null; artistEntryKey = null }
     when {
         loading -> LoadingState(Modifier.fillMaxSize())
         !searched -> {
@@ -303,8 +311,8 @@ private fun ResultsPane(
         songlists.isEmpty() && tracks.isEmpty() && artists.isEmpty() ->
             EmptyHint("没有找到结果", Modifier.fillMaxSize())
         else -> Box(modifier = Modifier.fillMaxSize()) {
-            // focusRestorer：专辑/歌手浮层关掉后，焦点回到关掉前那张卡片上（看得见的地方），
-            // 不落在屏幕外看不见的控件上。
+            // focusRestorer 只管方向键重新进入时回到上次那张卡片；浮层关掉后焦点是被
+            // 整个清空的，不会触发它，关掉后回哪张卡片由上面那套 entryKey + restore 管。
             Column(modifier = Modifier.fillMaxSize().focusRestorer()) {
             if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
                 SectionHeader("歌手 (${artists.size})")
@@ -313,7 +321,12 @@ private fun ResultsPane(
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
                     items(artists, key = { "${it.source.key}_${it.id}" }) { artist ->
-                        ArtistCard(artist = artist, onClick = { artistDetail = artist })
+                        val artistKey = "${artist.source.key}_${artist.id}"
+                        ArtistCard(
+                            artist = artist,
+                            modifier = restore.modifierFor(artistKey),
+                            onClick = { artistEntryKey = artistKey; artistDetail = artist },
+                        )
                     }
                 }
                 Spacer(Modifier.padding(top = 8.dp))
@@ -345,12 +358,14 @@ private fun ResultsPane(
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
                     items(albums, key = { "${it.source.key}_${it.name}" }) { album ->
+                        val albumKey = "${album.source.key}_${album.name}"
                         Box(modifier = Modifier.width(140.dp)) {
                             MediaCard(
                                 title = album.name,
                                 picURL = album.picURL,
                                 subtitle = "${album.singer} · ${album.tracks.size} 首",
-                                onClick = { albumDetail = album },
+                                modifier = restore.modifierFor(albumKey),
+                                onClick = { albumEntryKey = albumKey; albumDetail = album },
                             )
                         }
                     }
@@ -504,12 +519,11 @@ private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit, firstTab
 fun ArtistCard(
     artist: ArtistInfo,
     onClick: () -> Unit,
-    focusRequester: FocusRequester? = null,
+    modifier: Modifier = Modifier,
 ) {
     com.walkman.tv.ui.components.TvFocusable(
         onClick = onClick,
-        modifier = Modifier.width(140.dp)
-            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+        modifier = Modifier.width(140.dp).then(modifier),
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
@@ -670,6 +684,10 @@ fun ArtistDetailOverlay(
     var detail by remember { mutableStateOf<ArtistDetail?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var openAlbum by remember { mutableStateOf<AlbumInfo?>(null) }
+    // 点专辑卡片进专辑详情之前记住那张卡片，出来时焦点回到那张卡片上（不是回首页）。
+    val albumRestore = rememberOverlayFocusRestore()
+    var albumEntryKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(openAlbum) { if (openAlbum == null) albumRestore.restoreTo(albumEntryKey) }
     val scope = rememberCoroutineScope()
     // 专辑区平时占大半屏，热门歌只剩一行半：进歌单深处（第 2 行起）就把专辑区收起来，
     // 歌单占满剩余高度、一次能看五六行；回第 0 行按上时再展开、焦点落回第一张专辑卡片。
@@ -759,16 +777,18 @@ fun ArtistDetailOverlay(
                             contentPadding = PaddingValues(vertical = 4.dp),
                         ) {
                             itemsIndexed(d.albums, key = { _, it -> "${it.source.key}_${it.id}" }) { index, album ->
+                                val albumKey = "${album.source.key}_${album.id}"
                                 Box(modifier = Modifier.width(140.dp)) {
                                     MediaCard(
                                         title = album.name,
                                         picURL = album.picURL,
                                         subtitle = "${album.singer} · ${album.songCount?.let { "$it 首" } ?: ""}",
-                                        modifier = if (index == 0) Modifier
-                                            .focusRequester(anchorFocus)
-                                            .onFocusChanged { if (it.isFocused) anchorFocused = true }
-                                        else Modifier,
-                                        onClick = { openAlbum = album },
+                                        modifier = albumRestore.modifierFor(albumKey)
+                                            .then(if (index == 0) Modifier
+                                                .focusRequester(anchorFocus)
+                                                .onFocusChanged { if (it.isFocused) anchorFocused = true }
+                                            else Modifier),
+                                        onClick = { albumEntryKey = albumKey; openAlbum = album },
                                     )
                                 }
                             }

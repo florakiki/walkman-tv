@@ -38,6 +38,7 @@ import com.walkman.tv.source.catalog.SingerRegion
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
+import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TvPill
 import com.walkman.tv.ui.search.ArtistCard
 import com.walkman.tv.ui.theme.AppColors
@@ -53,7 +54,13 @@ import kotlinx.coroutines.delay
 fun SingerBrowseOverlay(
     onBack: () -> Unit,
     onOpenArtist: (ArtistInfo) -> Unit,
+    // 上面盖着的歌手页是否还开着：点歌手进歌手页时浏览页并不关（两层浮层叠着），
+    // 歌手页关掉时焦点要回到浏览页里刚才点的那张歌手卡片上。
+    artistOpen: Boolean = false,
 ) {
+    // 进歌手页之前记住点的那张歌手卡片，出来时焦点回到那张卡片上。
+    val restore = rememberOverlayFocusRestore()
+    var artistEntryKey by remember { mutableStateOf<String?>(null) }
     var region by remember { mutableStateOf(SingerRegion.ALL) }
     var singers by remember { mutableStateOf<List<ArtistInfo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
@@ -61,6 +68,17 @@ fun SingerBrowseOverlay(
     var hasMore by remember { mutableStateOf(true) }
     var page by remember { mutableStateOf(0) }
     val gridState = rememberLazyGridState()
+
+    // 歌手页关掉时焦点回到浏览页里刚才点的那张歌手卡片上：那张卡片可能已经滚出屏幕、
+    // 还没组合出来，先把它滚回视野里再聚焦。刚进浏览页时 artistOpen 就是 false，
+    // 但那时 entryKey 还是空的，什么都不做。
+    LaunchedEffect(artistOpen) {
+        if (!artistOpen) {
+            val index = artistEntryKey?.let { key -> singers.indexOfFirst { "${it.source.key}_${it.id}" == key } } ?: -1
+            if (index >= 0) runCatching { gridState.scrollToItem(index) }
+            restore.restoreTo(artistEntryKey)
+        }
+    }
 
     suspend fun loadPage(p: Int) {
         val result = runCatching { appContainer.artists.hotSingersPage(region, p) }.getOrNull() ?: return
@@ -137,7 +155,12 @@ fun SingerBrowseOverlay(
                     contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
                     items(singers, key = { "${it.source.key}_${it.id}" }) { artist ->
-                        ArtistCard(artist = artist, onClick = { onOpenArtist(artist) })
+                        val singerKey = "${artist.source.key}_${artist.id}"
+                        ArtistCard(
+                            artist = artist,
+                            modifier = restore.modifierFor(singerKey),
+                            onClick = { artistEntryKey = singerKey; onOpenArtist(artist) },
+                        )
                     }
                     if (loadingMore || !hasMore) {
                         item(key = "footer", span = { GridItemSpan(maxLineSpan) }) {

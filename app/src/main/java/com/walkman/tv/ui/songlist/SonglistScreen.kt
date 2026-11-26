@@ -34,6 +34,7 @@ import com.walkman.tv.ui.fetchOr
 import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.MediaCard
+import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TvPill
 import kotlinx.coroutines.launch
 
@@ -49,6 +50,12 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var loading by remember { mutableStateOf(false) }
     var detail by remember { mutableStateOf<Pair<SonglistInfo, List<Track>>?>(null) }
     var loadingDetail by remember { mutableStateOf(false) }
+    // 进歌单详情之前记住点的那张卡片，出来时焦点回到那张卡片上：浮层关掉时焦点是被
+    // 整个清空的，网格虽然还留在组合里、focusRestorer 也不会在这一刻触发，不记就回
+    // 不到点下去的位置。
+    val restore = rememberOverlayFocusRestore()
+    var detailEntryKey by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(detail) { if (detail == null) restore.restoreTo(detailEntryKey) }
 
     // 四个平台的推荐歌单合并：每个平台取自己的第一种排序 + 当前标签，拼起来去重（按歌单 id）。
     suspend fun fetchAllLists(t: SonglistTag): List<SonglistInfo> {
@@ -99,7 +106,14 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(uniqueLists, key = { it.id }) { sl ->
-                        MediaCard(title = sl.name, picURL = sl.picURL, subtitle = sl.playCount?.let { "▶ $it" }) {
+                        val cardKey = "${sl.source.key}_${sl.id}"
+                        MediaCard(
+                            title = sl.name,
+                            picURL = sl.picURL,
+                            subtitle = sl.playCount?.let { "▶ $it" },
+                            modifier = restore.modifierFor(cardKey),
+                        ) {
+                            detailEntryKey = cardKey
                             scope.launch {
                                 loadingDetail = true
                                 val d = fetchOr(null) { appContainer.songlists.serviceFor(sl.source)?.fetchDetail(sl) }
