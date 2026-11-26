@@ -14,14 +14,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -53,10 +57,40 @@ fun SingerBrowseOverlay(
     var region by remember { mutableStateOf(SingerRegion.ALL) }
     var singers by remember { mutableStateOf<List<ArtistInfo>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+    var loadingMore by remember { mutableStateOf(false) }
+    var hasMore by remember { mutableStateOf(true) }
+    var page by remember { mutableStateOf(0) }
+    val gridState = rememberLazyGridState()
+
+    suspend fun loadPage(p: Int) {
+        val result = runCatching { appContainer.artists.hotSingersPage(region, p) }.getOrNull() ?: return
+        singers = if (p == 0) result.singers else singers + result.singers
+        hasMore = result.hasMore
+        page = p
+    }
     LaunchedEffect(region) {
         loading = true
-        singers = runCatching { appContainer.artists.hotSingers(region, 48) }.getOrDefault(emptyList())
+        singers = emptyList()
+        hasMore = true
+        page = 0
+        loadPage(0)
         loading = false
+    }
+    // 翻到底自动拉下一页（全部 tab 每页 24，地区 tab 每页 10 个种子，最多 3 页）。
+    val nearEnd by remember {
+        derivedStateOf {
+            val info = gridState.layoutInfo
+            val total = info.totalItemsCount
+            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
+            total > 0 && last >= total - 6
+        }
+    }
+    LaunchedEffect(nearEnd) {
+        if (nearEnd && hasMore && !loading && !loadingMore) {
+            loadingMore = true
+            loadPage(page + 1)
+            loadingMore = false
+        }
     }
     // 打开就抢一次焦点落到“全部” tab 上，不然焦点还留在被盖住的首页上、页面看着像冻住。
     val firstTabFocus = remember { FocusRequester() }
@@ -96,6 +130,7 @@ fun SingerBrowseOverlay(
                 singers.isEmpty() -> EmptyHint("歌手列表拉不到，检查网络后重进试试", Modifier.fillMaxSize())
                 else -> LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 140.dp),
+                    state = gridState,
                     modifier = Modifier.fillMaxSize(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -103,6 +138,20 @@ fun SingerBrowseOverlay(
                 ) {
                     items(singers, key = { "${it.source.key}_${it.id}" }) { artist ->
                         ArtistCard(artist = artist, onClick = { onOpenArtist(artist) })
+                    }
+                    if (loadingMore || !hasMore) {
+                        item(key = "footer", span = { GridItemSpan(maxLineSpan) }) {
+                            Box(
+                                Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    if (loadingMore) "正在加载更多…" else "已显示全部",
+                                    color = AppColors.TextMuted,
+                                    fontSize = 14.sp,
+                                )
+                            }
+                        }
                     }
                 }
             }

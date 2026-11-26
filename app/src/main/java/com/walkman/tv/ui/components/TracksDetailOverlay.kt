@@ -72,6 +72,7 @@ fun TracksDetailOverlay(
             modifier = Modifier.fillMaxWidth().padding(top = 0.dp),
             nowPlayingId = nowId,
             initialFocus = true,
+            trapFocus = true,
         ) { idx ->
             playList(tracks, idx); onOpenPlayer()
         }

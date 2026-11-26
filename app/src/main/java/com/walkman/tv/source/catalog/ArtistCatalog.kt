@@ -78,15 +78,57 @@ enum class SingerRegion(val label: String) {
  *   只留精确匹配；/api/album/{id} 目前回验证码挑战，专辑详情拉不到时用聚合兜底。
  */
 class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
-    /** 地区种子歌手名（真实歌手，按地区分；查不到的跳过）。 */
+    /** 地区种子歌手名（真实歌手，按地区分；查不到的跳过）。每地区 30 个，浏览页每页查 10 个。 */
     private val regionSeeds: Map<SingerRegion, List<String>> = mapOf(
-        SingerRegion.MAINLAND to listOf("薛之谦", "许嵩", "汪苏泷", "李荣浩", "毛不易", "周深", "张杰", "华晨宇", "李健", "朴树"),
-        SingerRegion.HK_TW to listOf("周杰伦", "林俊杰", "陈奕迅", "蔡依林", "五月天", "张惠妹", "王力宏", "邓紫棋", "梁静茹", "孙燕姿"),
-        SingerRegion.WESTERN to listOf("Taylor Swift", "Ed Sheeran", "Adele", "Justin Bieber", "Billie Eilish", "Maroon 5", "Alan Walker", "Avicii"),
-        SingerRegion.JAPAN to listOf("米津玄師", "YOASOBI", "宇多田光", "King Gnu", "Official髭男dism", "LiSA", "Ado", "RADWIMPS"),
-        SingerRegion.KOREA to listOf("BTS", "BLACKPINK", "IU", "NewJeans", "SEVENTEEN", "TWICE", "BIGBANG", "G-DRAGON"),
+        SingerRegion.MAINLAND to listOf("薛之谦", "许嵩", "汪苏泷", "李荣浩", "毛不易", "周深", "张杰", "华晨宇", "李健", "朴树", "汪峰", "许巍", "郑钧", "老狼", "羽泉", "凤凰传奇", "筷子兄弟", "韩红", "那英", "孙楠", "韩磊", "沙宝亮", "杨坤", "刀郎", "海来阿木", "王靖雯", "单依纯", "希林娜依高", "黄霄雲", "刘宇宁"),
+        SingerRegion.HK_TW to listOf("周杰伦", "林俊杰", "陈奕迅", "蔡依林", "五月天", "张惠妹", "王力宏", "邓紫棋", "梁静茹", "孙燕姿", "刘德华", "张学友", "郭富城", "王菲", "莫文蔚", "杨千嬅", "容祖儿", "谢霆锋", "罗志祥", "潘玮柏", "林宥嘉", "萧敬腾", "田馥甄", "徐佳莹", "蔡健雅", "张国荣", "梅艳芳", "谭咏麟", "黎明", "吴克群"),
+        SingerRegion.WESTERN to listOf("Taylor Swift", "Ed Sheeran", "Adele", "Justin Bieber", "Billie Eilish", "Maroon 5", "Alan Walker", "Avicii", "Bruno Mars", "Lady Gaga", "Rihanna", "Beyoncé", "Katy Perry", "Ariana Grande", "Dua Lipa", "The Weeknd", "Drake", "Eminem", "Coldplay", "Imagine Dragons", "OneRepublic", "Shawn Mendes", "Selena Gomez", "Sia", "Sam Smith", "Charlie Puth", "Post Malone", "Camila Cabello", "Miley Cyrus", "Halsey"),
+        SingerRegion.JAPAN to listOf("米津玄師", "YOASOBI", "宇多田光", "King Gnu", "Official髭男dism", "LiSA", "Ado", "RADWIMPS", "星野源", "菅田将暉", "あいみょん", "優里", "back number", "SEKAI NO OWARI", "ONE OK ROCK", "BUMP OF CHICKEN", "Mr.Children", "嵐", "乃木坂46", "滨崎步", "安室奈美惠", "中岛美嘉", "平井坚", "福山雅治", "椎名林檎", "久石譲", "藤井風", "Vaundy", "緑黄色社会", "高橋優"),
+        SingerRegion.KOREA to listOf("BTS", "BLACKPINK", "IU", "NewJeans", "SEVENTEEN", "TWICE", "BIGBANG", "G-DRAGON", "EXO", "Red Velvet", "aespa", "ITZY", "LE SSERAFIM", "IVE", "(G)I-DLE", "NCT DREAM", "Stray Kids", "TXT", "ENHYPEN", "SHINee", "Super Junior", "Girls' Generation", "PSY", "ZICO", "Crush", "Heize", "AKMU", "DAY6", "WINNER", "iKON"),
     )
     private val hotCache = mutableMapOf<SingerRegion, List<ArtistInfo>>()
+    private val hotPageCache = mutableMapOf<Pair<SingerRegion, Int>, HotSingersPage>()
+
+    /** 翻页返回：一页歌手 + 后面还有没有。 */
+    data class HotSingersPage(val singers: List<ArtistInfo>, val hasMore: Boolean)
+
+    /**
+     * 歌手浏览页翻页拉取（全部 tab 每页 24，地区 tab 每页 10 个种子）。
+     * 注意不要复用 [hotSingers] 的缓存：推荐页先调 hotSingers(ALL, 12) 只存
+     * 15–20 个就进缓存，浏览页再调 take(48) 也只能拿到那几个——这就是之前
+     * “全部 tab 也只显示几个”的原因。翻页用自己按 (地区, 页) 分开的缓存。
+     */
+    suspend fun hotSingersPage(region: SingerRegion, page: Int): HotSingersPage {
+        hotPageCache[region to page]?.let { return it }
+        val result: HotSingersPage = if (region == SingerRegion.ALL) {
+            val pageSize = 24
+            val (kg, wy) = coroutineScope {
+                val kgJob = async { runCatching { KugouArtist(http).hotSingersPaged(page, pageSize) }.getOrDefault(emptyList()) }
+                val wyJob = async { runCatching { NetEaseArtist(http).hotSingersPaged(page, pageSize) }.getOrDefault(emptyList()) }
+                kgJob.await() to wyJob.await()
+            }
+            val merged = (kg + wy)
+                .groupBy { it.name }
+                .values
+                .map { group -> group.firstOrNull { !it.picURL.isNullOrBlank() } ?: group.first() }
+            HotSingersPage(merged, hasMore = (kg.size == pageSize || wy.size == pageSize) && page < 7)
+        } else {
+            val seeds = regionSeeds[region] ?: emptyList()
+            val chunks = seeds.chunked(10)
+            val names = chunks.getOrNull(page) ?: emptyList()
+            val found = coroutineScope {
+                names.map { name ->
+                    async {
+                        val results = runCatching { searchArtists(name, null) }.getOrNull() ?: emptyList()
+                        results.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: results.firstOrNull()
+                    }
+                }.awaitAll().filterNotNull().distinctBy { it.name }
+            }
+            HotSingersPage(found, hasMore = page < chunks.size - 1)
+        }
+        hotPageCache[region to page] = result
+        return result
+    }
 
     /**
      * 热门歌手列表（歌手浏览页用）。全部：酷狗 + 网易热榜合并去重；地区：种子名走搜索接口现查。
@@ -301,8 +343,10 @@ private class KugouArtist(private val http: CatalogHttp) {
     private val base = "http://mobilecdn.kugou.com/api/v3"
 
     /** 热门歌手列表：mobilecdn singer/list（classid/area 参数会被忽略，只有一份热榜）。 */
-    suspend fun hotSingers(limit: Int): List<ArtistInfo> {
-        val root = runCatching { JSONObject(http.getText("http://mobilecdn.kugou.com/api/v3/singer/list?plat=0&page=1&pagesize=$limit")) }.getOrNull()
+    suspend fun hotSingers(limit: Int): List<ArtistInfo> = hotSingersPaged(0, limit)
+
+    suspend fun hotSingersPaged(page: Int, pageSize: Int): List<ArtistInfo> {
+        val root = runCatching { JSONObject(http.getText("http://mobilecdn.kugou.com/api/v3/singer/list?plat=0&page=${page + 1}&pagesize=$pageSize")) }.getOrNull()
             ?: return emptyList()
         val arr = root.optJSONObject("data")?.optJSONArray("info") ?: return emptyList()
         val out = mutableListOf<ArtistInfo>()
@@ -478,8 +522,10 @@ private class NetEaseArtist(private val http: CatalogHttp) {
 
     /** type=100 目前回的都是无关结果，只留名字精确匹配的（接口恢复后自然生效）。 */
     /** 热门歌手列表：/api/artist/list（area/type 参数会被忽略，只有一份热榜）。 */
-    suspend fun hotSingers(limit: Int): List<ArtistInfo> {
-        val root = runCatching { JSONObject(http.getText("https://music.163.com/api/artist/list?type=1&area=7&initial=-1&offset=0&limit=$limit")) }.getOrNull()
+    suspend fun hotSingers(limit: Int): List<ArtistInfo> = hotSingersPaged(0, limit)
+
+    suspend fun hotSingersPaged(page: Int, pageSize: Int): List<ArtistInfo> {
+        val root = runCatching { JSONObject(http.getText("https://music.163.com/api/artist/list?type=1&area=7&initial=-1&offset=${page * pageSize}&limit=$pageSize")) }.getOrNull()
             ?: return emptyList()
         val arr = root.optJSONArray("artists") ?: return emptyList()
         val out = mutableListOf<ArtistInfo>()

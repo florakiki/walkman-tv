@@ -254,6 +254,12 @@ fun TrackList(
     /** Non-null ⇒ every row gets a delete button (从歌单移除 / 删除播放历史 …). */
     onRemove: ((Track) -> Unit)? = null,
     removeLabel: String = "删除",
+    /** true ⇒ 上下到头时把按键吃掉、停在原地，绝不漏到列表外（浮层里的列表用；顶层列表默认 false，走原来的空间焦点搜索）。 */
+    trapFocus: Boolean = false,
+    /** trapFocus 且在第 0 行按上时调用（浮层内往上走：歌手页回专辑行、搜索页回 tab 行）；不设就停在第 0 行。 */
+    onExitUp: (() -> Unit)? = null,
+    /** 焦点行变化时回调（歌手页用它在进歌单深处时收起专辑区）。 */
+    onFocusedIndexChange: ((Int) -> Unit)? = null,
     onPlay: (index: Int) -> Unit,
 ) {
     // Collect once here (shared StateFlows) and derive the set of tracks that are downloaded AND
@@ -282,26 +288,55 @@ fun TrackList(
     val focuserFor: (Int) -> FocusRequester = { rowFocusers.getOrPut(it) { FocusRequester() } }
     // Index of the row that currently holds focus (-1 = focus is outside the list).
     var focusedIndex by remember(tracks) { androidx.compose.runtime.mutableStateOf(-1) }
+    // 每次滚动步进的目标行：快速连按时，旧的滚动协程看到目标变了就自己停，别把焦点拽回旧行。
+    var stepTarget by remember { androidx.compose.runtime.mutableStateOf(-1) }
     // Holds the index of the row most recently clicked-to-play. When the player overlay
     // closes we re-request focus on this row so the user returns to the same line they
     // launched playback from.
     var lastClickedIndex by remember { androidx.compose.runtime.mutableStateOf(-1) }
     val scope = rememberCoroutineScope()
     // 往上/往下一行移焦点。目标行已经在屏幕上就直接聚焦；还没显示出来（在屏幕外、没组合）
-    // 就先把列表滚过去，等一帧让行组合好再聚焦，再试一次还落不上就停在原地——不抛异常。
+    // 就先把列表滚过去，等行组合好再聚焦。
+    //
+    // 教训（2026-11-26，Yang 实测安泊猜想 9 首）：旧步进只试两次、每次等 80ms，慢电视上
+    // 第 9 行还没组合好两次就试完了，焦点停在第 8 首到不了第 9 首；再按一下时按键没被吃掉，
+    // 焦点被默认搜索送到浮层下面去了。新步进：滚过去后循环重试，直到行真正显示出来且焦点
+    // 落上去、或试满 12 次（约 0.9 秒）才放弃；中途行一直没显示就再滚一次；快速连按时旧
+    // 协程看到目标变了就自己停，不把焦点拽回旧行。
+    // 到头（第 0 行按上 / 最后一行按下）：trapFocus 时把按键吃掉、停在原地，绝不漏到列表外；
+    // 非 trapFocus 保持原来的放行（顶层页面里焦点要能回到上面的 tab/行）。
     fun stepFocus(delta: Int): Boolean {
+        if (focusedIndex < 0) {
+            if (!trapFocus) return false
+            if (tracks.isEmpty()) return true
+            val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
+            runCatching { focuserFor(first.coerceIn(tracks.indices)).requestFocus() }
+            return true
+        }
         val target = focusedIndex + delta
-        if (focusedIndex < 0 || target < 0 || target >= tracks.size) return false
+        if (target < 0 || target >= tracks.size) {
+            if (!trapFocus) return false
+            if (delta < 0) onExitUp?.invoke()
+            return true
+        }
         val visible = listState.layoutInfo.visibleItemsInfo.any { it.index == target }
         if (visible) {
             runCatching { focuserFor(target).requestFocus() }
         } else {
+            stepTarget = target
             scope.launch {
                 runCatching { listState.scrollToItem(target) }
-                delay(80)
+                repeat(12) {
+                    if (focusedIndex == target || stepTarget != target) return@launch
+                    val nowVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == target }
+                    if (nowVisible) {
+                        runCatching { focuserFor(target).requestFocus() }
+                    } else {
+                        runCatching { listState.scrollToItem(target) }
+                    }
+                    delay(70)
+                }
                 runCatching { focuserFor(target).requestFocus() }
-                delay(80)
-                if (focusedIndex != target) runCatching { focuserFor(target).requestFocus() }
             }
         }
         return true
@@ -384,7 +419,12 @@ fun TrackList(
             // explicit Up/Down handler above uses it to step row by row.
             val rowModifier = Modifier
                 .focusRequester(focuserFor(index))
-                .onFocusChanged { if (it.isFocused) focusedIndex = index }
+                .onFocusChanged {
+                    if (it.isFocused) {
+                        focusedIndex = index
+                        onFocusedIndexChange?.invoke(index)
+                    }
+                }
             TrackRow(
                 track = track,
                 index = index,

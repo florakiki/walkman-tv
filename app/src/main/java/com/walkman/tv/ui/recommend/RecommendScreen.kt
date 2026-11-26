@@ -292,7 +292,7 @@ private fun RecommendGrid(
   Box(modifier = modifier) {
     LazyVerticalGrid(
       columns = GridCells.Adaptive(minSize = 180.dp),
-      modifier = Modifier.fillMaxSize().focusGroup()
+      modifier = Modifier.fillMaxSize().focusGroup().focusRestorer()
         .onFocusChanged { if (it.hasFocus) gridFocused = true },
       contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),
       horizontalArrangement = Arrangement.spacedBy(14.dp),

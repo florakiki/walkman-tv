@@ -35,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -80,6 +81,8 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var searched by remember { mutableStateOf(false) }
     var showQr by remember { mutableStateOf(false) }
     var hotColumns by remember { mutableStateOf<List<com.walkman.tv.source.catalog.HotSearchColumn>>(emptyList()) }
+    // 搜索结果列表在第 0 行按上时的出口：回到上面的分类 tab 行（列表里焦点不外漏）。
+    val tabRowFocus = remember { FocusRequester() }
 
     // Load hot-search words once when the screen first appears (before any search).
     LaunchedEffect(Unit) {
@@ -164,7 +167,7 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
 
         // RIGHT: category tabs + results
         Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            SearchTabRow(tab, onSelect = { tab = it })
+            SearchTabRow(tab, onSelect = { tab = it }, firstTabFocus = tabRowFocus)
             Spacer(Modifier.padding(top = 8.dp))
             ResultsPane(
                 loading = loading,
@@ -194,6 +197,7 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                         }
                     }
                 },
+                onSongsExitUp = { runCatching { tabRowFocus.requestFocus() } },
             )
         }
     }
@@ -255,6 +259,7 @@ private fun SearchInputBox(query: String) {
 
 // MARK: - Right panel --------------------------------------------------------------------------
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun ResultsPane(
     loading: Boolean,
@@ -269,6 +274,8 @@ private fun ResultsPane(
     onPickSonglist: (SonglistInfo) -> Unit,
     onPickHistory: (String) -> Unit = {},
     onPickHot: (String) -> Unit = {},
+    /** 歌曲列表在第 0 行按上时的出口（回到上面的分类 tab 行），不设就停在第 0 行。 */
+    onSongsExitUp: (() -> Unit)? = null,
 ) {
     val history by appContainer.searchHistoryStore.items.collectAsState()
     // 打开的专辑详情（浮层盖在结果区上，点里面的歌直接播）。换一批搜索结果就关掉，别留着旧专辑。
@@ -296,7 +303,9 @@ private fun ResultsPane(
         songlists.isEmpty() && tracks.isEmpty() && artists.isEmpty() ->
             EmptyHint("没有找到结果", Modifier.fillMaxSize())
         else -> Box(modifier = Modifier.fillMaxSize()) {
-            Column(modifier = Modifier.fillMaxSize()) {
+            // focusRestorer：专辑/歌手浮层关掉后，焦点回到关掉前那张卡片上（看得见的地方），
+            // 不落在屏幕外看不见的控件上。
+            Column(modifier = Modifier.fillMaxSize().focusRestorer()) {
             if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
                 SectionHeader("歌手 (${artists.size})")
                 LazyRow(
@@ -355,6 +364,8 @@ private fun ResultsPane(
                     tracks = tracks,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     nowPlayingId = nowId,
+                    trapFocus = true,
+                    onExitUp = onSongsExitUp,
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
                 )
             }
@@ -473,13 +484,14 @@ enum class SearchTab(val label: String) {
 }
 
 @Composable
-private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit) {
+private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit, firstTabFocus: FocusRequester? = null) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        SearchTab.entries.forEach { t ->
+        SearchTab.entries.forEachIndexed { index, t ->
             TvPill(
                 onClick = { onSelect(t) },
                 selected = tab == t,
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp),
+                modifier = if (index == 0 && firstTabFocus != null) Modifier.focusRequester(firstTabFocus) else Modifier,
             ) {
                 Text(t.label, fontSize = 14.sp, fontWeight = if (tab == t) FontWeight.Bold else FontWeight.Medium)
             }
@@ -639,6 +651,7 @@ fun AlbumDetailOverlay(
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     nowPlayingId = nowId,
                     initialFocus = true,
+                    trapFocus = true,
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
                 )
             }
@@ -657,6 +670,10 @@ fun ArtistDetailOverlay(
     var detail by remember { mutableStateOf<ArtistDetail?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var openAlbum by remember { mutableStateOf<AlbumInfo?>(null) }
+    val scope = rememberCoroutineScope()
+    // 专辑区平时占大半屏，热门歌只剩一行半：进歌单深处（第 2 行起）就把专辑区收起来，
+    // 歌单占满剩余高度、一次能看五六行；回第 0 行按上时再展开、焦点落回第一张专辑卡片。
+    var albumsCollapsed by remember { mutableStateOf(false) }
     LaunchedEffect(artist) {
         detail = runCatching { appContainer.artists.fetchArtistDetail(artist) }.getOrNull()
         loaded = true
@@ -735,7 +752,7 @@ fun ArtistDetailOverlay(
                 }
                 else -> {
                     val d = detail!!
-                    if (d.albums.isNotEmpty()) {
+                    if (!albumsCollapsed && d.albums.isNotEmpty()) {
                         SectionHeader("专辑 (${d.albums.size})")
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -766,6 +783,19 @@ fun ArtistDetailOverlay(
                             modifier = Modifier.fillMaxWidth().weight(1f),
                             nowPlayingId = nowId,
                             initialFocus = true,
+                            trapFocus = true,
+                            onFocusedIndexChange = { if (it >= 1) albumsCollapsed = true },
+                            onExitUp = {
+                                // 回专辑行：先把专辑区展开，等卡片组合好再把焦点落到第一张专辑卡片上。
+                                albumsCollapsed = false
+                                scope.launch {
+                                    repeat(10) {
+                                        runCatching { anchorFocus.requestFocus() }
+                                        if (anchorFocused) return@launch
+                                        delay(100)
+                                    }
+                                }
+                            },
                             onPlay = { idx -> playList(d.hotSongs, idx); onOpenPlayer() },
                         )
                     } else if (d.albums.isEmpty()) {
@@ -790,7 +820,7 @@ fun ArtistDetailOverlay(
             }
         }
         openAlbum?.let { album ->
-            AlbumDetailOverlay(info = album, onBack = { openAlbum = null }, onOpenPlayer = onOpenPlayer)
+            AlbumDetailOverlay(info = album, onBack = { openAlbum = null; albumsCollapsed = false }, onOpenPlayer = onOpenPlayer)
         }
     }
     androidx.activity.compose.BackHandler { onBack() }

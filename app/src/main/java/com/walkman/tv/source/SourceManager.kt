@@ -9,15 +9,20 @@ import com.walkman.tv.data.model.UserScript
 import com.walkman.tv.source.builtin.BuiltInResolver
 import com.walkman.tv.source.js.JsScriptRuntime
 import com.walkman.tv.source.js.ScriptHttpClient
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.selects.select
 import org.json.JSONArray
 import org.json.JSONObject
 
 /**
  * Owns loaded user scripts and resolves play URLs, ported from iOS `SourceManager`.
- * Resolve order: user script (with quality cascade) → other-source search → built-in direct.
+ * Resolve order: user script (one call — the script itself falls back through
+ * quality tiers internally) → other-source search (parallel race) → built-in direct.
  */
 class SourceManager(
     private val preload: String,
@@ -70,26 +75,19 @@ class SourceManager(
         scripts.forEachIndexed { scriptIdx, ls ->
             val scriptQs = ls.capabilities.sources[track.source]?.qualities?.toSet() ?: emptySet()
             val first = pickPlayQuality(preferred, track.qualities.toSet(), scriptQs)
-            val cascade = qualityCascade(first, track.qualities.toSet(), scriptQs)
-            for ((idx, q) in cascade.withIndex()) {
-                var timedOut = false
-                runCatching { resolveViaScript(track, q, ls) }
-                    .onSuccess { url ->
-                        val warn = when {
-                            scriptIdx > 0 -> "已切换到音源「${ls.script.name}」"
-                            idx > 0 -> "${first.displayName} 远程不支持，已降级到 ${q.displayName}"
-                            else -> null
-                        }
-                        return ResolvedTrack(url, ResolveOrigin.Script(ls.script.name), q, warn)
-                    }
-                    .onFailure {
-                        Log.d(TAG, "script '${ls.script.name}' @${q.key} failed: ${it.message}")
-                        timedOut = it is JsScriptRuntime.ScriptTimeoutException
-                    }
-                // An unresponsive script won't answer at a lower tier either; don't wait out the
-                // timeout once per tier (that was up to a minute of silence per song).
-                if (timedOut) break
-            }
+            // 每个脚本只调一次：脚本内部 musicUrl 已经按音质从高到低逐档回落
+            // （Ki.js 的 FALLBACK 表），一次调用就把 first 以下所有档都试过了。
+            // 之前按档逐个调：失败时同一批死接口要重复打 3–4 遍（实测酷狗 flac
+            // 一档就要 3 秒 500 失败 + 2 秒才轮到能用的接口），一首歌能静默几十秒。
+            // 快失败直接换下一个源/换源；脚本 15 秒无应答就跳过它。
+            runCatching { resolveViaScript(track, first, ls) }
+                .onSuccess { url ->
+                    val warn = if (scriptIdx > 0) "已切换到音源「${ls.script.name}」" else null
+                    return ResolvedTrack(url, ResolveOrigin.Script(ls.script.name), first, warn)
+                }
+                .onFailure {
+                    Log.d(TAG, "script '${ls.script.name}' @${first.key} failed: ${it.message}")
+                }
         }
 
         tryOtherSources(track, preferred)?.let { return it }
@@ -116,19 +114,43 @@ class SourceManager(
     private suspend fun tryOtherSources(track: Track, preferred: Quality): ResolvedTrack? {
         val alternatives = otherSourceFinder.findMatches(track)
         if (alternatives.isEmpty()) return null
-        for (alt in alternatives.take(5)) {
-            val altLS = scriptFor(alt.source, "musicUrl") ?: continue
-            val q = pickPlayQuality(
-                preferred,
-                alt.qualities.toSet(),
-                altLS.capabilities.sources[alt.source]?.qualities?.toSet() ?: emptySet(),
-            )
-            runCatching { resolveViaScript(alt, q, altLS) }.getOrNull()?.let { url ->
-                val warn = "当前源无法获取播放地址，已自动换源"
-                return ResolvedTrack(url, ResolveOrigin.OtherSource(alt.source), q, warn)
+        // 候选并行抢答：之前逐个串行解析，每个候选最多等 15 秒脚本超时，
+        // 5 个候选最坏 75 秒静默。现在 5 个同时解析，第一个成功的就用，其余取消，
+        // 最坏也就一个 15 秒的窗口。JsScriptRuntime 的 requestAction 用
+        // ConcurrentHashMap 按 UUID 挂起，ScriptHttpClient 每个请求是独立的
+        // OkHttp Call，并行安全。
+        return coroutineScope {
+            val deferreds = alternatives.take(5).map { alt ->
+                async {
+                    val altLS = scriptFor(alt.source, "musicUrl") ?: return@async null
+                    val q = pickPlayQuality(
+                        preferred,
+                        alt.qualities.toSet(),
+                        altLS.capabilities.sources[alt.source]?.qualities?.toSet() ?: emptySet(),
+                    )
+                    runCatching { resolveViaScript(alt, q, altLS) }.getOrNull()?.let { url ->
+                        ResolvedTrack(
+                            url,
+                            ResolveOrigin.OtherSource(alt.source),
+                            q,
+                            "当前源无法获取播放地址，已自动换源",
+                        )
+                    }
+                }
             }
+            var remaining = deferreds
+            while (remaining.isNotEmpty()) {
+                val (result, done) = select<Pair<ResolvedTrack?, Deferred<ResolvedTrack?>>> {
+                    remaining.forEach { d -> d.onAwait { it to d } }
+                }
+                if (result != null) {
+                    remaining.forEach { it.cancel() }
+                    return@coroutineScope result
+                }
+                remaining -= done
+            }
+            null
         }
-        return null
     }
 
     private suspend fun resolveViaScript(track: Track, quality: Quality, ls: LoadedScript): String {
@@ -216,8 +238,9 @@ class SourceManager(
 
         /**
          * Build the descending cascade from [first] to [Quality.K128] — spec §3 last paragraph.
-         * Each step uses the same per-tier rule as [pickPlayQuality]; 128k is appended
-         * unconditionally so we always have a final fallback to try.
+         * Kept for reference; resolveMusicURL no longer loops over it — the script itself
+         * falls back through tiers internally, so re-calling per tier only repeats the
+         * same dead API calls.
          */
         fun qualityCascade(first: Quality, trackQs: Set<Quality>, scriptQs: Set<Quality>): List<Quality> {
             val full = Quality.orderedHighToLow
