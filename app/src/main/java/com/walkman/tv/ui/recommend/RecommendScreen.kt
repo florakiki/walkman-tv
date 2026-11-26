@@ -7,9 +7,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
@@ -78,13 +80,16 @@ fun RecommendScreen(
   // 优化：左侧面板总宽度精调为屏幕高度的 55%
   val panelDynamicWidth = screenHeight * 0.55f
 
-  // 左右两块共用同一张焦点表：面板按右要送回网格里上次那张卡片，网格初始焦点和浮层
-  // 关掉后的恢复也走这张表，落的是同一批卡片。
+  // 左右两块共用同一张焦点表：面板按右要送到网格最顶上那张卡片，网格初始焦点和浮层
+  // 关掉后的恢复也走这张表，落的是同一批卡片。网格的滚动状态提上来，面板按右时先把
+  // 网格滚回顶部——最顶上那张卡片可能滚出屏幕外还没组合好，不滚回来直接请求焦点落不上。
   val restore = rememberOverlayFocusRestore()
+  val gridState = rememberLazyGridState()
   Row(modifier = modifier.fillMaxSize().padding(vertical = 8.dp)) {
     NowPlayingPanel(
       onOpenPlayer = onOpenPlayer,
       restore = restore,
+      onScrollGridToTop = { runCatching { gridState.scrollToItem(0) } },
       modifier = Modifier.width(panelDynamicWidth).fillMaxHeight()
     )
     Spacer(Modifier.width(16.dp))
@@ -92,6 +97,7 @@ fun RecommendScreen(
       onNavigate = onNavigate,
       onOpenPlayer = onOpenPlayer,
       restore = restore,
+      gridState = gridState,
       modifier = Modifier.weight(1f).fillMaxHeight(),
     )
   }
@@ -101,6 +107,7 @@ fun RecommendScreen(
 private fun NowPlayingPanel(
   onOpenPlayer: () -> Unit,
   restore: com.walkman.tv.ui.components.OverlayFocusRestore,
+  onScrollGridToTop: suspend () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   val controller = appContainer.playbackController
@@ -118,15 +125,21 @@ private fun NowPlayingPanel(
   Column(
     // 从左边面板按右，一定要能进到右边内容区去：圆钮在屏幕最底下一排，空间焦点搜索
     // 跨不过右边网格那层 focusGroup（要落的卡片在上面几行、根本不在圆钮那条横线上），
-    // 按右就卡在推荐页动不了。这里显式把焦点送回网格里上次那张卡片（restoreTo 自带
-    // 12 次×70ms 重试），不走空间搜索；按键吃掉，不再往下漏。封面和三个圆钮都在这
-    // 个 Column 里，按右都走这一条。
+    // 按右就卡在推荐页动不了。这里显式传焦点，不走空间搜索；按键吃掉，不再往下漏。
+    // 落点是右边内容最顶上那张卡片（Yang 定：落最顶上，不是落上次那张）——先把网格
+    // 滚回顶部（最顶上那张可能滚出屏幕外还没组合好），再由 restoreTo 重试到落上为止。
+    // 最顶上那张还没排出来（数据没到）时回落到上次那张卡片，再没有就放行走空间搜索。
+    // 封面和三个圆钮都在这个 Column 里，按右都走这一条。
     modifier = modifier.padding(start = 0.dp, end = 8.dp)
       .onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
         if (e.key != Key.DirectionRight) return@onPreviewKeyEvent false
-        val key = restore.lastFocusedKey ?: return@onPreviewKeyEvent false
-        scope.launch { restore.restoreTo(key) }
+        val topKey = restore.topCardKey
+        val key = topKey ?: restore.lastFocusedKey ?: return@onPreviewKeyEvent false
+        scope.launch {
+          if (topKey != null) onScrollGridToTop()
+          restore.restoreTo(key)
+        }
         true
       },
     horizontalAlignment = Alignment.CenterHorizontally,
@@ -250,6 +263,7 @@ private fun RecommendGrid(
   onNavigate: (NavSection) -> Unit,
   onOpenPlayer: () -> Unit,
   restore: com.walkman.tv.ui.components.OverlayFocusRestore,
+  gridState: LazyGridState,
   modifier: Modifier = Modifier,
 ) {
   val settings by appContainer.settingsStore.settings.collectAsState()
@@ -285,7 +299,8 @@ private fun RecommendGrid(
   // 数据是异步拉的，首张卡片可能还没排好版，重试到焦点真正落进网格里为止；焦点已经在
   // 网格里时就停，不把用户已移走的焦点拽回来。
   // 首张卡片的 FocusRequester 和“记住入口卡片”共用同一张表（restore.focuserFor），
-  // 初始焦点和浮层关掉后的恢复落的是同一批卡片。
+  // 初始焦点和浮层关掉后的恢复落的是同一批卡片。首张卡片的 key 同时记到 restore.topCardKey
+  // 上，左边面板按右就落到它上面（Yang 定：落最顶上，不是落上次那张）。
   var gridFocused by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
   androidx.compose.runtime.LaunchedEffect(hotSingers, home) {
     val firstKey: String? = when {
@@ -294,6 +309,7 @@ private fun RecommendGrid(
       home.recommendations.isNotEmpty() -> "songlist_${home.recommendations[0].source.key}_${home.recommendations[0].id}"
       else -> null
     }
+    restore.topCardKey = firstKey
     val target = firstKey?.let { restore.focuserFor(it) }
     for (attempt in 0 until 20) {
       if (gridFocused) break
@@ -340,6 +356,7 @@ private fun RecommendGrid(
   Box(modifier = modifier) {
     LazyVerticalGrid(
       columns = GridCells.Adaptive(minSize = 180.dp),
+      state = gridState,
       modifier = Modifier.fillMaxSize().focusGroup().focusRestorer()
         .onFocusChanged { if (it.hasFocus) gridFocused = true },
       contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),

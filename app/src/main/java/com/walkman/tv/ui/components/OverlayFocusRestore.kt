@@ -39,6 +39,8 @@ class OverlayFocusRestore {
     /** 最近一次落上焦点的卡片 key（没有就是 null）。左边面板按右回网格时用它当目标。 */
     var lastFocusedKey: String? = null
         private set
+    /** 右边内容最顶上那张卡片的 key（没有就是 null）。左边面板按右落到它上面（Yang 定：落最顶上，不是落上次那张）。由 RecommendGrid 在数据到齐时更新。 */
+    var topCardKey: String? = null
 
     /** 拿一张卡片的 FocusRequester（同一张卡片每次拿的是同一个）。 */
     fun focuserFor(key: String): FocusRequester = focusers.getOrPut(key) { FocusRequester() }
@@ -53,9 +55,10 @@ class OverlayFocusRestore {
             if (it.isFocused) { focusedKeys.add(key); lastFocusedKey = key } else focusedKeys.remove(key)
         }
 
-    /** 把焦点送回指定的那张卡片上。key 为空、或卡片已经不在了，就什么都不做。 */
+    /** 把焦点送到指定的那张卡片上。key 为空就什么都不做。卡片可能还没组合好（数据刚到、网格刚滚回顶部），请求器先建出来再重试：卡片组合时会挂上同一个请求器，之后某次重试就能落上；12 次都落不上就放弃，不抛异常。 */
     suspend fun restoreTo(key: String?) {
-        val focuser = key?.let { focusers[it] } ?: return
+        key ?: return
+        val focuser = focuserFor(key)
         repeat(12) {
             // 已经落上了就停：不然循环剩下的几次会把用户随后按方向键移走的焦点抢回来。
             if (key in focusedKeys) return
