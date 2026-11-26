@@ -268,12 +268,39 @@ class AudioSpecProbe(private val http: OkHttpClient) {
             if (!resp.isSuccessful) return@use null
             val stream = resp.body?.byteStream() ?: return@use null
             val bytes = readUpTo(stream, count)
+            // 2026-11-27《半醉半清醒》误判：206 的 Content-Length 是这段 Range 的长度
+            // （65536），不是文件总量——直接拿它当文件大小，超过约 65 秒的歌全被判脏。
+            // 总量只认 Content-Range（bytes 0-65535/<总量>）；200（服务器忽略 Range）
+            // 时 Content-Length 才是总量；206 却没给 Content-Range 时用 HEAD 再问一次，
+            // 再问不到就传 null（validateHead 跳过大小检查，绝不因拿不到大小判脏）。
+            val total: Long? = when {
+                resp.code == 206 -> parseContentRangeTotal(resp.header("Content-Range"))
+                    ?: fetchHeadTotal(url)
+                else -> resp.header("Content-Length")?.toLongOrNull()
+            }
             RemoteHead(
                 bytes = bytes,
                 contentType = resp.header("Content-Type"),
-                contentLength = resp.header("Content-Length")?.toLongOrNull(),
+                contentLength = total,
             )
         }
+    }
+
+    /** "bytes 0-65535/11806346" → 11806346；总量是 * 或未知时返回 null。 */
+    private fun parseContentRangeTotal(contentRange: String?): Long? {
+        val total = contentRange?.substringAfterLast('/', "")?.toLongOrNull() ?: return null
+        return if (total > 0) total else null
+    }
+
+    /** HEAD 不带 Range 问文件总量（只在 206 却没给 Content-Range 时用）；问不到就 null。 */
+    private fun fetchHeadTotal(url: String): Long? {
+        val headReq = Request.Builder().url(url).header("User-Agent", UA).head().build()
+        return runCatching {
+            http.newCall(headReq).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.header("Content-Length")?.toLongOrNull()
+            }
+        }.getOrNull()
     }
 
     suspend fun probe(url: String): AudioSpec? = withContext(Dispatchers.IO) {
