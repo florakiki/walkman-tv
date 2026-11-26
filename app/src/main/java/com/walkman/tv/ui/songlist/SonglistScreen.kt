@@ -22,7 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
@@ -51,8 +50,7 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var detail by remember { mutableStateOf<Pair<SonglistInfo, List<Track>>?>(null) }
     var loadingDetail by remember { mutableStateOf(false) }
     // 进歌单详情之前记住点的那张卡片，出来时焦点回到那张卡片上：浮层关掉时焦点是被
-    // 整个清空的，网格虽然还留在组合里、focusRestorer 也不会在这一刻触发，不记就回
-    // 不到点下去的位置。
+    // 整个清空的，网格虽然还留在组合里，不记就回不到点下去的位置。
     val restore = rememberOverlayFocusRestore()
     var detailEntryKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(detail) { if (detail == null) restore.restoreTo(detailEntryKey) }
@@ -100,8 +98,9 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                 loading -> LoadingState(Modifier.fillMaxSize())
                 lists.isNotEmpty() -> LazyVerticalGrid(
                     columns = GridCells.Fixed(4),
-                    modifier = Modifier.fillMaxWidth().weight(1f)
-                        .focusRestorer(), // restore the previously-focused card on back-nav
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    // 详情关掉回哪张卡片由上面 detailEntryKey + restore.restoreTo 管，不用
+                    // focusRestorer（节点脱离时抛 IllegalStateException，2026-11-26 闪退根因）。
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {

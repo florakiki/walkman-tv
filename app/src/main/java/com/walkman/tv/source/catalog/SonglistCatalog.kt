@@ -110,7 +110,7 @@ private class KuwoSonglist(private val http: CatalogHttp) : SonglistService {
             id = id, source = SourceID.KW,
             name = d.optString("name", "未知歌单").decodeHtmlEntities(),
             author = d.optString("uname").decodeHtmlEntities(),
-            picURL = d.optString("img").ifEmpty { null },
+            picURL = kuwoThumb300(d.optString("img").ifEmpty { null }),
             trackCount = total,
             playCount = formatPlayCount(plays),
         )
@@ -199,7 +199,7 @@ private class NetEaseSonglist(private val http: CatalogHttp) : SonglistService {
             id = id, source = SourceID.WY,
             name = d.optString("name", "未知歌单").decodeHtmlEntities(),
             author = (creator?.optString("nickname") ?: "").decodeHtmlEntities(),
-            picURL = d.optString("coverImgUrl").ifEmpty { null },
+            picURL = netEaseThumb300(d.optString("coverImgUrl").ifEmpty { null }),
             trackCount = d.optInt("trackCount").takeIf { it > 0 },
             playCount = formatPlayCount(d.optLong("playCount")),
         )
@@ -220,7 +220,7 @@ private class NetEaseSonglist(private val http: CatalogHttp) : SonglistService {
         val updated = list.copy(
             name = result.optString("name").ifEmpty { list.name },
             author = result.optJSONObject("creator")?.optString("nickname")?.ifEmpty { null } ?: list.author,
-            picURL = result.optString("coverImgUrl").ifEmpty { null } ?: list.picURL,
+            picURL = netEaseThumb300(result.optString("coverImgUrl").ifEmpty { null }) ?: list.picURL,
             trackCount = result.optInt("trackCount").takeIf { it > 0 } ?: tracks.size,
         )
         return SonglistDetail(updated, tracks)
@@ -241,7 +241,7 @@ private class NetEaseSonglist(private val http: CatalogHttp) : SonglistService {
         val updated = list.copy(
             name = pl.optString("name").ifEmpty { list.name },
             author = pl.optJSONObject("creator")?.optString("nickname")?.ifEmpty { null } ?: list.author,
-            picURL = pl.optString("coverImgUrl").ifEmpty { null } ?: list.picURL,
+            picURL = netEaseThumb300(pl.optString("coverImgUrl").ifEmpty { null }) ?: list.picURL,
             trackCount = tracks.size,
         )
         return SonglistDetail(updated, tracks)

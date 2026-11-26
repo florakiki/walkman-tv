@@ -1,6 +1,7 @@
 package com.walkman.tv.ui.mobile
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,14 +19,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,9 +61,11 @@ import com.walkman.tv.data.model.BoardInfo
 import com.walkman.tv.data.model.SonglistInfo
 import com.walkman.tv.data.model.SonglistTag
 import com.walkman.tv.data.model.SourceID
+import com.walkman.tv.data.model.Track
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.fetchOr
 import com.walkman.tv.ui.playList
+import com.walkman.tv.ui.recommend.buildGuessYouLike
 import com.walkman.tv.ui.theme.AppColors
 
 /**
@@ -78,6 +86,12 @@ fun MobileHomeScreen(
     val settings by appContainer.settingsStore.settings.collectAsState()
     val home by appContainer.homeStore.state.collectAsState()
     val history by appContainer.libraryStore.history.collectAsState()
+    // 猜你喜欢：本机播放历史 + 收藏推（见 GuessYouLike.kt），没历史时热门榜兜底。
+    // 只读 libraryStore 的 StateFlow，不改它；历史 / 收藏 / 启用的音源一变就重算（电视端同款接法）。
+    val loved by appContainer.libraryStore.love.collectAsState()
+    var guessTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
+    // 新区“查看全部”的完整列表（每日30首 / 猜你喜欢共用，曲目是已拉到的，不再联网拉）。
+    var openTrackList by remember { mutableStateOf<TrackListDetail?>(null) }
     var tab by remember { mutableStateOf(0) }
     val tabs = listOf("推荐", "歌单", "排行榜")
     // 歌手入口：首页“歌手”区只放前 10 个热门歌手头像，点“查看全部”进歌手浏览页。
@@ -89,6 +103,11 @@ fun MobileHomeScreen(
 
     LaunchedEffect(settings.homeSources) {
         appContainer.homeStore.loadIfNeeded(settings.homeSources)
+    }
+    LaunchedEffect(history, loved, settings.homeSources) {
+        guessTracks = runCatching {
+            buildGuessYouLike(appContainer.catalogs, appContainer.boards, settings.homeSources, history.tracks, loved.tracks)
+        }.getOrDefault(emptyList())
     }
     LaunchedEffect(Unit) {
         hotSingers = runCatching { appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 10) }.getOrDefault(emptyList())
@@ -171,6 +190,34 @@ fun MobileHomeScreen(
 
         when (tab) {
             0 -> {
+                // 新区放最前面，跟电视端一致：每日30首 → 猜你喜欢 → 原来的顺序。
+                // 空的时候整段不画，不留空白标题。
+                if (home.daily30.isNotEmpty()) {
+                    item {
+                        SectionHeader("每日30首") { openTrackList = TrackListDetail("每日30首", "每天更新", home.daily30) }
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    item {
+                        TrackCardRowMobile(home.daily30) { index ->
+                            playList(home.daily30, index)
+                            onOpenPlayer()
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
+                if (guessTracks.isNotEmpty()) {
+                    item {
+                        SectionHeader("猜你喜欢") { openTrackList = TrackListDetail("猜你喜欢", null, guessTracks) }
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    item {
+                        TrackCardRowMobile(guessTracks) { index ->
+                            playList(guessTracks, index)
+                            onOpenPlayer()
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                }
                 item {
                     SectionHeader("推荐歌单") { tab = 1 }
                 }
@@ -305,6 +352,15 @@ fun MobileHomeScreen(
                 onOpenPlayer = onOpenPlayer,
             )
         }
+        // 新区“查看全部”的完整列表，盖在首页内容上（跟歌手浏览页 / 歌手页同一层）。
+        openTrackList?.let { detail ->
+            TrackListDetailView(
+                detail = detail,
+                playingId = playingId,
+                onBack = { openTrackList = null },
+                onOpenPlayer = onOpenPlayer,
+            )
+        }
     }
 }
 
@@ -417,6 +473,124 @@ private fun AllSonglistsGrid(columns: Int, onOpen: (SonglistInfo) -> Unit) {
         lists.chunked(columns).forEach { row ->
             SonglistRow(row, columns, onOpen)
             Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+/** 新区完整列表的入参：标题 + 副标题 + 已拉到的曲目（不再联网拉）。 */
+private data class TrackListDetail(val title: String, val subtitle: String?, val tracks: List<Track>)
+
+/**
+ * 新区（每日30首 / 猜你喜欢）的横排歌曲卡片行：前 12 首，点卡片直接播整段队列。
+ * 手机触屏版，不带电视那套焦点逻辑；只显示歌名 + 歌手，不显示平台来源。
+ */
+@Composable
+private fun TrackCardRowMobile(
+    tracks: List<Track>,
+    onPlay: (Int) -> Unit,
+) {
+    LazyRow(
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(vertical = 4.dp),
+    ) {
+        itemsIndexed(tracks.take(12), key = { _, it -> it.id }) { index, track ->
+            Column(
+                modifier = Modifier
+                    .width(128.dp)
+                    .clickable { onPlay(index) },
+            ) {
+                CoverImage(
+                    track.picURL,
+                    Modifier.fillMaxWidth().aspectRatio(1f).clip(RoundedCornerShape(12.dp)),
+                )
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    track.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AppColors.TextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (track.singer.isNotBlank()) {
+                    Text(
+                        track.singer,
+                        fontSize = 12.sp,
+                        color = AppColors.TextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 新区“查看全部”的完整列表：照手机歌单详情（MobileSonglistScreen）的样式——
+ * 返回头 + 副标题 / 首数 + 全部播放 + 曲目列表（TrackRowMobile，点一首就播整段队列）。
+ * 曲目是调用方已经拉到的，不再联网拉；不显示平台来源。
+ */
+@Composable
+private fun TrackListDetailView(
+    detail: TrackListDetail,
+    playingId: String?,
+    onBack: () -> Unit,
+    onOpenPlayer: () -> Unit,
+) {
+    BackHandler(onBack = onBack)
+    Column(
+        modifier = Modifier.fillMaxSize().background(AppColors.BgDeep),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.Filled.ArrowBack, contentDescription = "返回")
+            }
+            Text(detail.title, fontSize = 17.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                val sub = listOfNotNull(
+                    detail.subtitle,
+                    "${detail.tracks.size} 首",
+                ).joinToString(" · ")
+                Text(sub, fontSize = 13.sp, color = AppColors.TextSecondary)
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+            Button(
+                onClick = {
+                    if (detail.tracks.isNotEmpty()) {
+                        playList(detail.tracks, 0)
+                        onOpenPlayer()
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+                enabled = detail.tracks.isNotEmpty(),
+            ) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text("全部播放", fontSize = 14.sp)
+            }
+        }
+        LazyColumn(modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+            itemsIndexed(detail.tracks) { i, track ->
+                TrackRowMobile(
+                    track = track,
+                    index = i,
+                    showCover = false,
+                    isPlaying = track.id == playingId,
+                    onClick = {
+                        playList(detail.tracks, i)
+                        onOpenPlayer()
+                    },
+                )
+            }
         }
     }
 }

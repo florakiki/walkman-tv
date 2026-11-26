@@ -41,7 +41,9 @@ class SourceManager(
 
     @Volatile var fallbackEnabled: Boolean = true
 
-    class SourceException(message: String) : Exception(message)
+    /** 播不起来时抛的异常。attemptedSources：这次解析试过哪些源（只记日志用，
+     *  播放失败写进诊断记录时取，见 CrashDiagnostics）。 */
+    class SourceException(message: String, val attemptedSources: List<String> = emptyList()) : Exception(message)
 
     suspend fun load(script: UserScript): Result<ScriptCapabilities> {
         return try {
@@ -71,8 +73,13 @@ class SourceManager(
     suspend fun resolveMusicURL(track: Track, quality: Quality? = null): ResolvedTrack {
         val preferred = quality ?: Quality.K320
 
+        // 这次解析试过哪些源：只记日志用（真播不了时写进诊断记录），不参与换源决策。
+        // 成功挂在 ResolvedTrack 上、失败挂在 SourceException 上，调用方按需取。
+        val attempted = mutableListOf<String>()
+
         val scripts = scriptsFor(track.source, "musicUrl")
         scripts.forEachIndexed { scriptIdx, ls ->
+            attempted += "${track.source.displayName}（脚本 ${ls.script.name}）"
             val scriptQs = ls.capabilities.sources[track.source]?.qualities?.toSet() ?: emptySet()
             val first = pickPlayQuality(preferred, track.qualities.toSet(), scriptQs)
             // 每个脚本只调一次：脚本内部 musicUrl 已经按音质从高到低逐档回落
@@ -83,44 +90,54 @@ class SourceManager(
             runCatching { resolveViaScript(track, first, ls) }
                 .onSuccess { url ->
                     val warn = if (scriptIdx > 0) "已切换到音源「${ls.script.name}」" else null
-                    return ResolvedTrack(url, ResolveOrigin.Script(ls.script.name), first, warn)
+                    return ResolvedTrack(url, ResolveOrigin.Script(ls.script.name), first, warn, attempted.distinct())
                 }
                 .onFailure {
                     Log.d(TAG, "script '${ls.script.name}' @${first.key} failed: ${it.message}")
                 }
         }
 
-        tryOtherSources(track, preferred)?.let { return it }
+        tryOtherSources(track, preferred, attempted)?.let { return it }
 
         if (fallbackEnabled) {
+            attempted += "内置直连"
             val qForFallback = if (track.qualities.contains(preferred)) preferred else (track.qualities.firstOrNull() ?: Quality.K128)
             runCatching { builtIn.resolve(track, qForFallback) }.getOrNull()?.let { res ->
-                return ResolvedTrack(res.url, ResolveOrigin.DirectFallback, qForFallback, res.warning)
+                return ResolvedTrack(res.url, ResolveOrigin.DirectFallback, qForFallback, res.warning, attempted.distinct())
             }
         }
 
         if (scriptFor(track.source, "musicUrl") == null) {
-            throw SourceException("没有可用的播放源，请到设置 → 自定义音源 导入脚本")
+            throw SourceException("没有可用的播放源，请到设置 → 自定义音源 导入脚本", attempted.distinct())
         }
-        throw SourceException("这首歌无法获取播放地址，换一首或换个能用的脚本")
+        throw SourceException("这首歌无法获取播放地址，换一首或换个能用的脚本", attempted.distinct())
     }
 
     /** Play-time cross-source fallback (第 6 条)：解析时拿到的地址播起来才发现是坏的，
      *  换其它平台的同一首歌再试。解析阶段的换源在 resolveMusicURL 里已经做了，这里是
      *  播放器报错后才走的第二道。 */
-    suspend fun resolveOtherSource(track: Track, preferred: Quality): ResolvedTrack? =
-        tryOtherSources(track, preferred)
+    suspend fun resolveOtherSource(track: Track, preferred: Quality): ResolvedTrack? {
+        // 播时换源单独记一份试过的源（成功时挂在 ResolvedTrack 上带回去）。
+        val attempted = mutableListOf<String>()
+        return tryOtherSources(track, preferred, attempted)
+    }
 
-    private suspend fun tryOtherSources(track: Track, preferred: Quality): ResolvedTrack? {
+    private suspend fun tryOtherSources(
+        track: Track,
+        preferred: Quality,
+        attempted: MutableList<String>,
+    ): ResolvedTrack? {
         val alternatives = otherSourceFinder.findMatches(track)
         if (alternatives.isEmpty()) return null
+        val raced = alternatives.take(5)
+        raced.forEach { attempted += it.source.displayName }
         // 候选并行抢答：之前逐个串行解析，每个候选最多等 15 秒脚本超时，
         // 5 个候选最坏 75 秒静默。现在 5 个同时解析，第一个成功的就用，其余取消，
         // 最坏也就一个 15 秒的窗口。JsScriptRuntime 的 requestAction 用
         // ConcurrentHashMap 按 UUID 挂起，ScriptHttpClient 每个请求是独立的
         // OkHttp Call，并行安全。
         return coroutineScope {
-            val deferreds = alternatives.take(5).map { alt ->
+            val deferreds = raced.map { alt ->
                 async {
                     val altLS = scriptFor(alt.source, "musicUrl") ?: return@async null
                     val q = pickPlayQuality(
@@ -134,6 +151,7 @@ class SourceManager(
                             ResolveOrigin.OtherSource(alt.source),
                             q,
                             "当前源无法获取播放地址，已自动换源",
+                            attempted.distinct(),
                         )
                     }
                 }

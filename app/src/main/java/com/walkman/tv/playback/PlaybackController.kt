@@ -19,6 +19,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import com.walkman.tv.data.store.PlaybackSnapshot
 import com.walkman.tv.data.model.Quality
 import com.walkman.tv.data.model.Track
+import com.walkman.tv.di.CrashDiagnostics
 import com.walkman.tv.source.ResolveOrigin
 import com.walkman.tv.source.ResolvedTrack
 import com.walkman.tv.source.SourceManager
@@ -31,6 +32,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.random.Random
 
 enum class RepeatMode { OFF, ALL, ONE }
@@ -76,6 +79,10 @@ class PlaybackController(
     /** Last quality the cascade settled on for the current track — used by [onPlayerError]
      *  to decide which tier to step down from on format-reject errors. */
     private var lastAttemptedQuality: Quality? = null
+
+    /** 这首歌解析时试过哪些源（成功时从 ResolvedTrack 带回来，播时换源成功再并进来）：
+     *  播失败写诊断记录时用；playAt 新歌时清掉。 */
+    private var lastAttemptedSources: List<String> = emptyList()
 
     /** Number of consecutive network-error retries on the current track. Reset to 0 on a
      *  successful play, on a fresh playAt(), or once we've given up and skipped to next. */
@@ -177,16 +184,19 @@ class PlaybackController(
          *  links shouldn't spin forever). */
         const val MAX_CONSECUTIVE_FAILURES = 3
 
+        /** 点播前验地址（AudioSpecProbe.validate）最多等多久：超时就放行，绝不把播放卡死。 */
+        const val GATE_TIMEOUT_MS = 5_000L
+
         /**
          * Build the ExoPlayer with settings tuned for music playback on Android TV:
          *
          * - Larger LoadControl buffers (60s max / 30s min target) so a Hi-Res FLAC at
          *   ~10 Mbps doesn't constantly underrun on slower connections; the start
          *   threshold (3s) keeps perceived play latency low.
-         * - DefaultAudioSink with audio offload enabled — on Android 10+ the OS will
-         *   route bit-perfect PCM/FLAC to dedicated DSP/HDMI passthrough when the
-         *   downstream device can decode it, preserving 24-bit / 96-192 kHz tracks
-         *   without resampling.
+         * - DefaultAudioSink with audio offload DISABLED by default — offload would route
+         *   the stream to DSP/HDMI passthrough and bypass the processor chain (built-in
+         *   gain + waveform meter). Users who want bit-perfect PCM/FLAC passthrough can
+         *   switch Hi-Res 直通 on in settings; AppContainer applies it from there.
          * - DefaultRenderersFactory in PREFER_EXTENSION mode so the bundled FLAC /
          *   OPUS / VORBIS extension renderers (when present) win over the slower
          *   MediaCodec path.
@@ -256,17 +266,31 @@ class PlaybackController(
             val player = ExoPlayer.Builder(appContext)
                 .setRenderersFactory(renderersFactory)
                 .setLoadControl(loadControl)
-                .setAudioAttributes(audioAttrs, /* handleAudioFocus = */ true)
+                // handleAudioFocus = false（2026-11-26）：之前开着时，系统 / 别的 App 一抢音频焦点，
+                // ExoPlayer 就把音量压到约 20%（ducking），焦点回来再恢复——同一首歌里音量
+                // 一会儿有一会儿没有、反复切好几次，听着就像增益在来回开关。增益本身在代码
+                // 里没有任何中途重置的路径（播放器只建一次、换源一首只换一次、开关只响应
+                // 用户点按），所以这条反复压音量的路只能是焦点 ducking。关掉它：同一首歌
+                // 从头到尾音量只由增益开关决定。代价：别的 App 放音频时音乐不再自动让路
+                // （不会暂停 / 压低），要停得手动按一下——电视上没电话，这点可以接受。
+                .setAudioAttributes(audioAttrs, /* handleAudioFocus = */ false)
                 .setHandleAudioBecomingNoisy(true)
                 .build()
 
-            // Ask the OS for audio offload when the downstream sink (DSP / HDMI passthrough /
-            // Bluetooth A2DP offload) can decode it directly — preserves bit-perfect PCM/FLAC.
+            // Audio offload defaults to DISABLED here (2026-11-26): offload hands the
+            // compressed stream straight to the DSP / HDMI passthrough and bypasses the
+            // whole DefaultAudioSink processor chain — including the built-in gain. With
+            // the old ENABLED default, whether a track got the gain depended on whether
+            // ExoPlayer chose offload for that track's format, i.e. the gain could
+            // silently drop out per track (and the setting default is off, see
+            // SettingsStore.audioOffloadEnabled). The settings collector in AppContainer
+            // still turns offload on for users who switch Hi-Res 直通 on — this default
+            // only closes the window where a track could offload before settings apply.
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setAudioOffloadPreferences(
                     TrackSelectionParameters.AudioOffloadPreferences.Builder()
                         .setAudioOffloadMode(
-                            TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED,
+                            TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED,
                         )
                         .build(),
                 )
@@ -306,7 +330,12 @@ class PlaybackController(
                 if (playbackState == Player.STATE_READY) {
                     // A track actually started — clear the consecutive-failure streak.
                     consecutiveFailures = 0
-                    _state.value = _state.value.copy(durationMs = player.duration.coerceAtLeast(0))
+                    // ... and drop the resolve-time notice ("已自动换源" etc.): it was only
+                    // relevant while the URL was being found; once the song is playing it is
+                    // stale and must not linger on the player / home panel status line.
+                    // Real failures still surface via error / failAndAdvance (a failed track
+                    // never reaches READY, so its warning is untouched here).
+                    _state.value = _state.value.copy(durationMs = player.duration.coerceAtLeast(0), warning = null)
                     // Start resolving the next track in the background while this one plays.
                     preloadNext()
                 }
@@ -434,6 +463,7 @@ class PlaybackController(
         // continue counting retries within the same logical attempt.
         if (qualityCap == null) {
             lastAttemptedQuality = null
+            lastAttemptedSources = emptyList()
             networkRetryCount = 0
             crossSourceTriedFor = null
             // A new track is starting — the old preload (if any) is for a different next.
@@ -473,77 +503,169 @@ class PlaybackController(
             } else {
                 runCatching { sources.resolveMusicURL(track, effectivePreferred) }
             }
-            runCatching { playResolvedOrFail(track, resolved) }
-                .onFailure { e ->
-                    android.util.Log.e("PlaybackController", "playAt crashed", e)
-                    failAndAdvance(e.message ?: e::class.simpleName ?: "播放出错")
-                }
+            // playResolvedOrFail 是 suspend（关口验地址要等网络），不能包在 runCatching 里
+            // （它的 lambda 不是 suspend 上下文），改 try/catch。
+            try {
+                playResolvedOrFail(track, resolved)
+            } catch (e: Exception) {
+                android.util.Log.e("PlaybackController", "playAt crashed", e)
+                failAndAdvance(
+                    e.message ?: e::class.simpleName ?: "播放出错",
+                    (e as? SourceManager.SourceException)?.attemptedSources ?: emptyList(),
+                )
+            }
         }
     }
 
-    private fun playResolvedOrFail(track: Track, resolved: Result<ResolvedTrack>) {
-        resolved.onSuccess { r ->
-                // 脏地址兜底：解析器偶尔会吐出空地址或非音频 scheme（例如把报错页当成音频
-                // 文件）。直接交给 ExoPlayer 会撞死电视原生解码器（SIGSEGV，Kotlin 层抓不
-                // 住、无回调）。先拦下来，按失败处理自动跳下一首，不交给播放器。
-                val scheme = runCatching { android.net.Uri.parse(r.url).scheme?.lowercase() }.getOrNull()
-                if (r.url.isBlank() || scheme !in setOf("http", "https", "file", "content")) {
-                    failAndAdvance("播放地址无效")
-                    return@onSuccess
-                }
-                val item = MediaItem.Builder()
-                    .setUri(r.url)
-                    .setMediaMetadata(
-                        MediaMetadata.Builder()
-                            .setTitle(track.name)
-                            .setArtist(track.singer)
-                            .setAlbumTitle(track.albumName)
-                            .apply { track.picURL?.let { setArtworkUri(android.net.Uri.parse(it)) } }
-                            .build(),
-                    )
-                    .build()
-                // Remember the tier so onPlayerError can re-cascade from one tier below if
-                // ExoPlayer rejects the file format.
-                lastAttemptedQuality = r.quality
-                // Successful resolve + setMediaItem → reset the network retry counter so the
-                // next track gets a fresh budget.
-                networkRetryCount = 0
-                player.setMediaItem(item)
-                player.prepare()
-                // Fire the file-header probe so the badge can later clamp the claimed tier
-                // down if the bytes turn out to be lower-grade than the script reported.
-                // Spec §5.4: clear current spec first, run async, validate URL is still
-                // current before publishing.
-                _audioSpec.value = null
-                probingUrl = r.url
-                probeJob?.cancel()
-                if (audioSpecProbe != null) {
-                    probeJob = scope.launch {
-                        val targetUrl = r.url
-                        val spec = audioSpecProbe.probe(targetUrl)
-                        if (spec != null && probingUrl == targetUrl) {
-                            _audioSpec.value = spec
+    private suspend fun playResolvedOrFail(track: Track, resolved: Result<ResolvedTrack>) {
+        // 注意：这里不用 resolved.onSuccess {}——关口验地址要调 suspend 的 validate，
+        // onSuccess 的 lambda 不是 suspend 上下文。先拆出值再走直线代码。
+        val r = resolved.getOrNull()
+        if (r == null) {
+            // Couldn't get a play URL for this track — auto-skip (or stop after too many).
+            val e = resolved.exceptionOrNull()
+            failAndAdvance(
+                e?.message ?: "无法播放",
+                (e as? SourceManager.SourceException)?.attemptedSources ?: emptyList(),
+            )
+            return
+        }
+            // 脏地址兜底：解析器偶尔会吐出空地址或非音频 scheme（例如把报错页当成音频
+            // 文件）。直接交给 ExoPlayer 会撞死电视原生解码器（SIGSEGV，Kotlin 层抓不
+            // 住、无回调）。先拦下来，按失败处理自动跳下一首，不交给播放器。
+            val scheme = runCatching { android.net.Uri.parse(r.url).scheme?.lowercase() }.getOrNull()
+            if (r.url.isBlank() || scheme !in setOf("http", "https", "file", "content")) {
+                failAndAdvance("播放地址无效", r.attemptedSources)
+                return
+            }
+            // 点播前验播放地址（2026-11-26《相亲相爱》原生闪退）：Ki.js 只认 URL 以
+            // http 开头就返回，内容从不验——后端把报错页/截断文件当音频发过来，头几个
+            // 字节看着像 FLAC（角标能读出 24bit/192kHz），后面的帧是坏的，解码器几秒
+            // 后直接 SIGSEGV，进程被杀、诊断里什么都没有。先拿头 64KB 验文件头/容器/
+            // 帧/大小（见 AudioSpecProbe.validate），脏的拦下来走播时换源（其它平台
+            // 同一首），哪个平台都播不了再跳下一首；验不出（探头为空、网络不给 Range、
+            // 超时、容器不认）一律放行，绝不把播放卡死。本地文件（已下载/SAF 导入）
+            // 同样验：file:// 走探头读文件，content:// 这里读头字节再验。
+            // 播时换源那条路也进这个函数，所以中途换源同样验。预载的地址播到时也
+            // 经过这里。MV 不走这里。
+            val gate: AudioSpecProbe.HeadVerdict? = when {
+                audioSpecProbe == null -> null
+                scheme == "content" -> readContentHead(r.url, track.duration)
+                else -> withTimeoutOrNull(GATE_TIMEOUT_MS) {
+                    audioSpecProbe.validate(r.url, track.duration)
+                } ?: AudioSpecProbe.HeadVerdict.Unknown("校验超时 ${GATE_TIMEOUT_MS}ms，放行")
+            }
+            val dirty = gate as? AudioSpecProbe.HeadVerdict.Dirty
+            if (dirty != null) {
+                android.util.Log.w(
+                    "PlaybackController",
+                    "dirty play URL intercepted for ${track.name} - ${track.singer}: ${dirty.reason}",
+                )
+                // 静默换源：屏幕上什么都不显示（2026-11-26 定“不用提示”），只记诊断。
+                tryCrossSourceOrAdvance(track, "点播前拦截到脏地址（${dirty.reason}）", silent = true)
+                return
+            }
+            val item = MediaItem.Builder()
+                .setUri(r.url)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(track.name)
+                        .setArtist(track.singer)
+                        .setAlbumTitle(track.albumName)
+                        .apply { track.picURL?.let { setArtworkUri(android.net.Uri.parse(it)) } }
+                        .build(),
+                )
+                .build()
+            // Remember the tier so onPlayerError can re-cascade from one tier below if
+            // ExoPlayer rejects the file format.
+            lastAttemptedQuality = r.quality
+            // 记下这次解析试过哪些源（播时换源成功会再并进来），播失败写诊断记录时用。
+            lastAttemptedSources = (lastAttemptedSources + r.attemptedSources).distinct()
+            // Successful resolve + setMediaItem → reset the network retry counter so the
+            // next track gets a fresh budget.
+            networkRetryCount = 0
+            player.setMediaItem(item)
+            player.prepare()
+            // Fire the file-header probe so the badge can later clamp the claimed tier
+            // down if the bytes turn out to be lower-grade than the script reported.
+            // Spec §5.4: clear current spec first, run async, validate URL is still
+            // current before publishing.
+            // 2026-11-26 音质核对：脚本只回一个 URL、不回它实际用的档位，ResolvedTrack.quality
+            // 记的是“请求档位”（pickPlayQuality 定的 first），不是到手那份文件的档位——
+            // 提供方静默降档（要 FLAC24 给了 128k/AAC）时角标会一直显示请求档位，听着发闷
+            // 却看不出原因。探头是唯一实测：拿到结果就按 displayQuality 校正 state.quality
+            // （角标只有一个真相来源），并把“请求档位 vs 实测”写进诊断记录；探头不认的容器
+            // （AAC/M4A 等）也记一笔，免得角标显示 Hi-Res、实际却没测到。
+            // lastAttemptedQuality 不动：降级重试要从“尝试过的档位”往下走，不是实测档位。
+            _audioSpec.value = null
+            probingUrl = r.url
+            probeJob?.cancel()
+            if (audioSpecProbe != null) {
+                val claimedQuality = r.quality
+                val songLabel = "${track.name} - ${track.singer}"
+                probeJob = scope.launch {
+                    val targetUrl = r.url
+                    val spec = audioSpecProbe.probe(targetUrl)
+                    if (probingUrl != targetUrl) return@launch
+                    if (spec != null) {
+                        _audioSpec.value = spec
+                        val shown = displayQuality(claimedQuality, spec)
+                        if (shown != null && Quality.rank(shown) > Quality.rank(claimedQuality)) {
+                            _state.value = _state.value.copy(quality = shown)
+                            CrashDiagnostics.recordQualityNote(
+                                appContext,
+                                songLabel,
+                                requested = claimedQuality.displayName,
+                                measured = spec.displayText,
+                            )
                         }
+                    } else if (Quality.rank(claimedQuality) <= Quality.rank(Quality.FLAC)) {
+                        CrashDiagnostics.recordQualityNote(
+                            appContext,
+                            songLabel,
+                            requested = claimedQuality.displayName,
+                            measured = "文件头未识别（可能是 AAC/M4A 等探头不认的容器），角标显示的仍是请求档位",
+                        )
                     }
                 }
-                // NOTE: MediaSessionService startup is currently disabled — Android 12+ kills
-                // the process via ForegroundServiceDidNotStartInTimeException if the service
-                // doesn't post a media notification within 5s, which races with our URL-resolve
-                // path. Re-enable once a proper MediaNotification.Provider is in place.
-                // ensureService()
-                player.playWhenReady = true
-                _state.value = _state.value.copy(
-                    resolving = false,
-                    warning = r.warning,
-                    originLabel = r.origin.label,
-                    quality = r.quality,
-                )
-                onTrackStarted?.invoke(track)
-                // (lyrics already loaded in playAt when the track switched)
-            }.onFailure { e ->
-                // Couldn't get a play URL for this track — auto-skip (or stop after too many).
-                failAndAdvance(e.message ?: "无法播放")
             }
+            // NOTE: MediaSessionService startup is currently disabled — Android 12+ kills
+            // the process via ForegroundServiceDidNotStartInTimeException if the service
+            // doesn't post a media notification within 5s, which races with our URL-resolve
+            // path. Re-enable once a proper MediaNotification.Provider is in place.
+            // ensureService()
+            player.playWhenReady = true
+            _state.value = _state.value.copy(
+                resolving = false,
+                warning = r.warning,
+                originLabel = r.origin.label,
+                quality = r.quality,
+            )
+            onTrackStarted?.invoke(track)
+            // (lyrics already loaded in playAt when the track switched)
+    }
+
+    /**
+     * 读 content:// 本地文件的头字节再验（SAF 导入的歌）。读不到、验不出都放行——
+     * 本地文件验的目的是拦坏文件，不是拦播。
+     */
+    private suspend fun readContentHead(url: String, durationSec: Int?): AudioSpecProbe.HeadVerdict {
+        val probe = audioSpecProbe ?: return AudioSpecProbe.HeadVerdict.Unknown("无探头")
+        return runCatching {
+            val bytes = withContext(Dispatchers.IO) {
+                appContext.contentResolver.openInputStream(android.net.Uri.parse(url))?.use { stream ->
+                    val buf = ByteArray(65_536)
+                    var total = 0
+                    while (total < buf.size) {
+                        val n = stream.read(buf, total, buf.size - total)
+                        if (n <= 0) break
+                        total += n
+                    }
+                    buf.copyOf(total)
+                }
+            } ?: return AudioSpecProbe.HeadVerdict.Unknown("content:// 读不到")
+            probe.validateHead(bytes, contentType = null, contentLength = null, durationSec = durationSec)
+        }.getOrElse { AudioSpecProbe.HeadVerdict.Unknown("content:// 校验异常：${it.message}") }
     }
 
     /**
@@ -551,24 +673,44 @@ class PlaybackController(
      * Auto-skip to the next track so the queue keeps going; only stop once
      * [MAX_CONSECUTIVE_FAILURES] tracks fail back-to-back. The streak resets when any track
      * reaches READY (see the player listener). Guarded so a user skipping mid-delay wins.
+     *
+     * 真播不了时屏幕上什么都不显示（2026-11-26 Yang 定：不弹框、不 toast、不在状态行
+     * 显示），只静默记进诊断记录（设置 → 查看诊断记录能看到是哪首歌、换了哪几个源、
+     * 什么原因）。自动跳下一首 / 连败 3 首停下来的行为本身不动。
      */
-    private fun failAndAdvance(reason: String) {
+    private fun failAndAdvance(reason: String, attemptedSources: List<String> = emptyList()) {
         // Stop whatever is still loaded (e.g. a cascade retry's half-played attempt) so a failed
         // track actually goes silent.
         runCatching { player.stop() }
         networkRetryCount = 0
         consecutiveFailures++
+        val track = _state.value.currentTrack
+        val sources = attemptedSources.ifEmpty { lastAttemptedSources }
+            .ifEmpty { _state.value.originLabel?.let { listOf(it) } ?: emptyList() }
+        val logReason = if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            "连续 $MAX_CONSECUTIVE_FAILURES 首播放失败，已停止（$reason）"
+        } else {
+            "播放失败，自动播放下一首（$reason）"
+        }
+        if (track != null) {
+            CrashDiagnostics.recordPlaybackFailure(
+                appContext,
+                "${track.name} - ${track.singer}",
+                sources,
+                logReason,
+            )
+        }
         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
             consecutiveFailures = 0
             _state.value = _state.value.copy(
-                error = "连续 $MAX_CONSECUTIVE_FAILURES 首播放失败，已停止（$reason）",
+                error = null,
                 resolving = false,
                 warning = null,
             )
             return
         }
         _state.value = _state.value.copy(
-            warning = "播放失败，自动播放下一首（$reason）",
+            warning = null,
             resolving = false,
             error = null,
         )
@@ -585,18 +727,24 @@ class PlaybackController(
      * Play-time cross-source fallback (第 6 条)：解析时拿到的地址播起来才发现是坏的
      * （坏文件 / 死链），先在其它平台搜同一首歌换个地址再播，播起来为止；哪个平台都
      * 播不了才跳下一首。同一首歌只换一次源，避免在坏地址之间来回跳。
+     * [silent]：点播前验地址拦下来的脏 URL 用——换源中屏幕上什么都不显示（2026-11-26
+     * 定“不用提示”），只记诊断记录；其它错误路径保持原样。
      */
-    private fun tryCrossSourceOrAdvance(track: Track, reason: String) {
+    private fun tryCrossSourceOrAdvance(track: Track, reason: String, silent: Boolean = false) {
         if (crossSourceTriedFor == track.id) {
-            failAndAdvance(reason)
+            failAndAdvance(reason, lastAttemptedSources + "播时换源（其它平台）")
             return
         }
         crossSourceTriedFor = track.id
-        _state.value = _state.value.copy(
-            warning = "这首歌当前源播不了，正在换其它源…",
-            resolving = true,
-            error = null,
-        )
+        if (!silent) {
+            _state.value = _state.value.copy(
+                warning = "这首歌当前源播不了，正在换其它源…",
+                resolving = true,
+                error = null,
+            )
+        } else {
+            _state.value = _state.value.copy(resolving = true, error = null)
+        }
         val trackId = track.id
         scope.launch {
             val res = runCatching { sources.resolveOtherSource(track, preferredQuality) }.getOrNull()
@@ -606,7 +754,7 @@ class PlaybackController(
                 networkRetryCount = 0
                 playResolvedOrFail(track, Result.success(res))
             } else {
-                failAndAdvance(reason)
+                failAndAdvance(reason, lastAttemptedSources + "播时换源（其它平台）")
             }
         }
     }

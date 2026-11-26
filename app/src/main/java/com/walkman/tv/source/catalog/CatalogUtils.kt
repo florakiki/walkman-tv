@@ -28,6 +28,24 @@ fun String.decodeHtmlEntities(): String {
 }
 
 /**
+ * 列表缩略图统一取 ~300px（电视卡片就那么大，300 看不出差别，加载更快、占内存更少）。
+ * 只用在榜单/歌单封面（BoardInfo / SonglistInfo.picURL）上；Track.picURL 不要用——
+ * 它还共用给播放页 0.67 屏高的大封面和全屏模糊背景，改小会把大图改糊。
+ */
+
+/** NetEase 图床：不带参数的 coverImgUrl 是原图（实测 800×800）；?param=300y300 要 300px 版。 */
+fun netEaseThumb300(url: String?): String? {
+    if (url.isNullOrEmpty()) return null
+    return url.substringBefore("?") + "?param=300y300"
+}
+
+/** Kuwo 歌单图把尺寸嵌在文件名尾（…_500.jpg）；实测把 _500 换成 _300 能拿到 300×300。只认 _500，别的不动。 */
+fun kuwoThumb300(url: String?): String? {
+    if (url.isNullOrEmpty()) return null
+    return if (url.endsWith("_500.jpg")) url.dropLast("_500.jpg".length) + "_300.jpg" else url
+}
+
+/**
  * Kuwo's `search.kuwo.cn/r.s` returns JS-object-ish text with unquoted keys even with rformat=json.
  * Pull out a top-level array by [key], quoting bare identifier keys when needed (iOS KuwoTolerantJSON).
  */

@@ -3,12 +3,25 @@ package com.walkman.tv.source.catalog
 import com.walkman.tv.data.model.Quality
 import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
+import com.walkman.tv.data.store.JsonStore
 import com.walkman.tv.ui.components.groupAlbums
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Serializable
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 /** 歌手（搜索结果里的歌手卡片 / 歌手页用）。 */
 data class ArtistInfo(
@@ -67,6 +80,10 @@ data class CatalogPage<T>(val items: List<T>, val hasMore: Boolean)
  *   每项带 singerid / singername / imgurl / songcount / albumcount。
  * - 酷我：www artistList 返回 "The request is illegal!"（要 csrf），走不通。
  * - 网易：/api/artist/list 能拉热门歌手，但 area/type 参数会被忽略（各地区返回同一份热榜）。
+ * 2026-11-26 晚 M 上又扫了一遍确认结论不变：网易 area=7/96/8/16/0 与 type=1/2 全回
+ * 同一份热榜（林俊杰/薛之谦/陈奕迅…）；酷狗 classid=1/2/88 与 area=1 也全回同一份热榜
+ * （周杰伦/薛之谦/林俊杰…）。所以五个地区都没有可用的列表接口，继续走种子搜索；
+ * 快的办法是种子名四平台抢答（先到先赢）+ 查到一个上一个 + 打开浏览页时后台预热。
  * 所以“全部”用酷狗 + 网易两份热榜合并去重；五个地区没有平台接口能分，
  * 用知名歌手名当种子、走搜索接口现查真实信息（头像、歌曲数、专辑数）拼出来，名字是真实歌手、
  * 数据是接口实时返回的，不是假数据。种子查不到就跳过，不留空白卡片。
@@ -94,7 +111,37 @@ enum class SingerRegion(val label: String) {
  * - 网易：/api/artist/{id}、/api/artist/albums/{id} 通；歌手搜 type=100 目前回的都是无关结果（“30”），
  *   只留精确匹配；/api/album/{id} 目前回验证码挑战，专辑详情拉不到时用聚合兜底。
  */
-class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
+/**
+ * 磁盘缓存的 DTO：ArtistInfo 是普通 data class（没加 @Serializable），不动共享模型，
+ * 缓存层自己转一道。source 只存 key，读回时对不上已知平台的丢掉。
+ * 只缓存推荐页用的 ALL 地区热榜（12 个歌手，变化慢）；地区 tab 走种子搜索现查，
+ * 不进这个缓存。
+ */
+@Serializable
+private data class ArtistDto(
+    val source: String,
+    val id: String,
+    val name: String,
+    val picURL: String? = null,
+    val songCount: Int? = null,
+    val albumCount: Int? = null,
+)
+
+@Serializable
+private data class HotSingersCache(val artists: List<ArtistDto> = emptyList())
+
+private fun ArtistInfo.toDto() = ArtistDto(source.key, id, name, picURL, songCount, albumCount)
+
+private fun ArtistDto.toArtistInfo(): ArtistInfo? {
+    val src = SourceID.fromKey(source) ?: return null
+    return ArtistInfo(src, id, name, picURL, songCount, albumCount)
+}
+
+class Artists(
+    private val http: CatalogHttp,
+    private val catalogs: Catalogs,
+    cacheFile: File? = null,
+) {
     /** 地区种子歌手名（真实歌手，按地区分；查不到的跳过）。每地区 30 个，浏览页每页查 10 个。 */
     private val regionSeeds: Map<SingerRegion, List<String>> = mapOf(
         SingerRegion.MAINLAND to listOf("薛之谦", "许嵩", "汪苏泷", "李荣浩", "毛不易", "周深", "张杰", "华晨宇", "李健", "朴树", "汪峰", "许巍", "郑钧", "老狼", "羽泉", "凤凰传奇", "筷子兄弟", "韩红", "那英", "孙楠", "韩磊", "沙宝亮", "杨坤", "刀郎", "海来阿木", "王靖雯", "单依纯", "希林娜依高", "黄霄雲", "刘宇宁"),
@@ -105,6 +152,16 @@ class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
     )
     private val hotCache = mutableMapOf<SingerRegion, List<ArtistInfo>>()
     private val hotPageCache = mutableMapOf<Pair<SingerRegion, Int>, HotSingersPage>()
+
+    /** 推荐页热门歌手磁盘缓存（hot-singers-cache.json）。构造时不读盘——hotSingers()
+     *  第一次被调时才同步读一次垫底；没接 cacheFile（传 null）时行为和原来完全一样。 */
+    private val hotSingersCacheStore: JsonStore<HotSingersCache>? =
+        cacheFile?.let { JsonStore(it, HotSingersCache.serializer(), HotSingersCache()) }
+    /** 后台刷新用的作用域：垫底返回后拉新数据只写内存 + 磁盘缓存，不动已返回的列表。 */
+    private val refreshScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var hotSingersRefreshJob: Job? = null
+    /** 地区 tab 第 0 页后台预热用的任务：同一时间只跑一份。 */
+    private var preloadRegionsJob: Job? = null
 
     /** 翻页返回：一页歌手 + 后面还有没有。 */
     data class HotSingersPage(val singers: List<ArtistInfo>, val hasMore: Boolean)
@@ -134,12 +191,8 @@ class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
             val chunks = seeds.chunked(10)
             val names = chunks.getOrNull(page) ?: emptyList()
             val found = coroutineScope {
-                names.map { name ->
-                    async {
-                        val results = runCatching { searchArtists(name, null) }.getOrNull() ?: emptyList()
-                        results.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: results.firstOrNull()
-                    }
-                }.awaitAll().filterNotNull().distinctBy { it.name }
+                names.map { name -> async { searchArtistExact(name) } }
+                    .awaitAll().filterNotNull().distinctBy { it.name }
             }
             HotSingersPage(found, hasMore = page < chunks.size - 1)
         }
@@ -148,12 +201,154 @@ class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
     }
 
     /**
+     * 单个种子名查歌手（地区 tab 用）：四平台同时查，第一个“名字对得上且带头像”的
+     * 结果就赢，立刻返回，其余平台取消——不用等最慢的 QQ 直达（M 上实测单次约 4.5 秒，
+     * 加上 OkHttp 每 host 只允许 5 并发、10 个名字要跑两波，之前一页要等 9 秒以上才画）。
+     * 先到的结果没头像时（酷狗搜歌手接口不带头像）只再等 1.2 秒等带头像的，超时就用它；
+     * 四个平台都查不到就返回 null，调用方跳过，不留空白卡片。
+     * 注意 searchArtists() 不能复用：它是给搜索页用的，要四个平台的全量结果。
+     */
+    private suspend fun searchArtistExact(name: String): ArtistInfo? = coroutineScope {
+        val pending = listOf(
+            async { runCatching { QqArtist(http).searchArtists(name) }.getOrDefault(emptyList()) },
+            async { runCatching { KugouArtist(http).searchArtists(name) }.getOrDefault(emptyList()) },
+            async { runCatching { KuwoArtist(http, catalogs).searchArtists(name) }.getOrDefault(emptyList()) },
+            async { runCatching { NetEaseArtist(http).searchArtists(name) }.getOrDefault(emptyList()) },
+        ).toMutableList()
+        var fallback: ArtistInfo? = null
+        try {
+            while (pending.isNotEmpty()) {
+                val done: Deferred<List<ArtistInfo>> = if (fallback == null) {
+                    select { pending.forEach { d -> d.onAwait { d } } }
+                } else {
+                    withTimeoutOrNull(1200) {
+                        select { pending.forEach { d -> d.onAwait { d } } }
+                    } ?: break
+                }
+                pending.remove(done)
+                val list = done.await()
+                val hit = list.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                    ?: list.firstOrNull()
+                if (hit == null) continue
+                if (!hit.picURL.isNullOrBlank()) return@coroutineScope hit
+                if (fallback == null) fallback = hit
+            }
+        } finally {
+            pending.forEach { it.cancel() }
+        }
+        fallback
+    }
+
+    /**
+     * 歌手浏览页翻页的流式版：地区 tab 每页 10 个种子名并行查，查到一个就发一次
+     * （累计列表按种子顺序排），不用等 10 个全回来才画；全部 tab 还是两平台并行一页，
+     * 拉到就发一次。成页后一样写 hotPageCache，预加载 / 二次点都直接命中缓存。
+     * 快速切 tab 时旧的收集被取消，在途的搜索跟着取消，不会堆请求。
+     */
+    fun hotSingersPageFlow(region: SingerRegion, page: Int): Flow<HotSingersPage> = flow {
+        hotPageCache[region to page]?.let { emit(it); return@flow }
+        if (region == SingerRegion.ALL) {
+            emit(hotSingersPage(region, page))
+            return@flow
+        }
+        val seeds = regionSeeds[region] ?: emptyList()
+        val chunks = seeds.chunked(10)
+        val names = chunks.getOrNull(page) ?: emptyList()
+        if (names.isEmpty()) {
+            emit(HotSingersPage(emptyList(), false))
+            return@flow
+        }
+        val hasMore = page < chunks.size - 1
+        val found = arrayOfNulls<ArtistInfo>(names.size)
+        var emittedCount = 0
+        coroutineScope {
+            val pending = names.mapIndexed { index, name ->
+                async { index to searchArtistExact(name) }
+            }.toMutableList()
+            while (pending.isNotEmpty()) {
+                val done = select { pending.forEach { d -> d.onAwait { d } } }
+                pending.remove(done)
+                val (index, artist) = done.await()
+                if (artist == null) continue
+                found[index] = artist
+                val list = found.filterNotNull().distinctBy { it.name }
+                if (list.size > emittedCount) {
+                    emittedCount = list.size
+                    emit(HotSingersPage(list, hasMore))
+                }
+            }
+        }
+        hotPageCache[region to page] = HotSingersPage(found.filterNotNull().distinctBy { it.name }, hasMore)
+    }
+
+    /**
+     * 浏览页打开后在后台把 5 个地区 tab 的第 0 页逐个拉好写进 hotPageCache，
+     * 点过去直接出。同一时间只跑一份；已缓存的地区跳过。串行拉，避免 5 个地区
+     * 同时抢连接池拖慢当前正在看的 tab。
+     */
+    fun preloadRegionPages() {
+        if (preloadRegionsJob?.isActive == true) return
+        preloadRegionsJob = refreshScope.launch {
+            for (region in SingerRegion.entries) {
+                if (region == SingerRegion.ALL) continue
+                if (hotPageCache.containsKey(region to 0)) continue
+                runCatching { hotSingersPage(region, 0) }
+            }
+        }
+    }
+
+    /**
      * 热门歌手列表（歌手浏览页用）。全部：酷狗 + 网易热榜合并去重；地区：种子名走搜索接口现查。
      * 结果按地区缓存在内存里，切 tab 不用重复拉。
+     *
+     * 启动空白修法（只针对推荐页用的 ALL）：内存没命中时先同步读磁盘缓存垫底、立刻
+     * 返回，后台再拉一份新的写内存 + 磁盘；新数据下次进推荐页（切 tab 回来 / 下次
+     * 冷启动）就是新的。要的比缓存多时走网络一次拿全，顺手更新缓存。
+     * 注意：第一次调用时 limit 是每平台的拉取页大小，缓存里存的是那次合并后的整份；
+     * 之后调用要的比缓存多（limit > 缓存数）就重新拉，不拿 12 个的缓存顶 30 个的请求。
      */
     suspend fun hotSingers(region: SingerRegion, limit: Int = 30): List<ArtistInfo> {
-        hotCache[region]?.let { return it.take(limit) }
-        val list: List<ArtistInfo> = if (region == SingerRegion.ALL) {
+        hotCache[region]?.let { if (region != SingerRegion.ALL || limit <= it.size) return it.take(limit) }
+        if (region == SingerRegion.ALL) {
+            val disk = hotSingersCacheStore?.load()?.artists
+                ?.mapNotNull { it.toArtistInfo() }.orEmpty()
+            if (disk.isNotEmpty()) {
+                hotCache[region] = disk
+                if (limit <= disk.size) {
+                    refreshHotSingersInBackground(limit)
+                    return disk.take(limit)
+                }
+                // 要的比缓存多：往下走网络一次拿全。
+            }
+        }
+        val list = fetchHotSingersFresh(region, limit)
+        hotCache[region] = list
+        if (region == SingerRegion.ALL && list.isNotEmpty()) {
+            refreshScope.launch {
+                runCatching { hotSingersCacheStore?.save(HotSingersCache(list.map { it.toDto() })) }
+            }
+        }
+        return list.take(limit)
+    }
+
+    /** 磁盘垫底后在后台拉一份新的：只刷新内存 + 磁盘缓存，不动这次已返回的列表。
+     *  同一时间只跑一份，避免切 tab 反复触发时并发刷。拉不到（断网）就留着旧缓存。 */
+    private fun refreshHotSingersInBackground(limit: Int) {
+        if (hotSingersCacheStore == null) return
+        if (hotSingersRefreshJob?.isActive == true) return
+        hotSingersRefreshJob = refreshScope.launch {
+            val fresh = runCatching { fetchHotSingersFresh(SingerRegion.ALL, limit) }.getOrNull()
+            if (!fresh.isNullOrEmpty()) {
+                hotCache[SingerRegion.ALL] = fresh
+                runCatching { hotSingersCacheStore?.save(HotSingersCache(fresh.map { it.toDto() })) }
+            }
+        }
+    }
+
+    /** 原 hotSingers() 里的网络拉取部分，原样抽出来：ALL 走酷狗 + 网易热榜合并去重，
+     *  地区走种子名搜索现查。 */
+    private suspend fun fetchHotSingersFresh(region: SingerRegion, limit: Int): List<ArtistInfo> {
+        return if (region == SingerRegion.ALL) {
             coroutineScope {
                 val kg = async { runCatching { KugouArtist(http).hotSingers(limit) }.getOrDefault(emptyList()) }
                 val wy = async { runCatching { NetEaseArtist(http).hotSingers(limit) }.getOrDefault(emptyList()) }
@@ -175,8 +370,6 @@ class Artists(private val http: CatalogHttp, private val catalogs: Catalogs) {
                 }.awaitAll().filterNotNull().distinctBy { it.name }
             }
         }
-        hotCache[region] = list
-        return list.take(limit)
     }
 
 

@@ -133,7 +133,7 @@ private class NetEaseBoard(private val http: CatalogHttp) : BoardService {
         return (0 until arr.length()).mapNotNull { i ->
             val item = arr.optJSONObject(i) ?: return@mapNotNull null
             val id = item.opt("id")?.toString() ?: return@mapNotNull null
-            BoardInfo("wy__$id", SourceID.WY, id, item.optString("name", "未知"), item.optString("coverImgUrl").ifEmpty { null })
+            BoardInfo("wy__$id", SourceID.WY, id, item.optString("name", "未知"), netEaseThumb300(item.optString("coverImgUrl").ifEmpty { null }))
         }
     }
 

@@ -40,13 +40,25 @@ class LibraryStore(context: Context) {
     private val _userLists = MutableStateFlow<List<Playlist>>(emptyList())
     val userLists: StateFlow<List<Playlist>> = _userLists.asStateFlow()
 
-    suspend fun loadAll() {
-        val data = withContext(Dispatchers.IO) { store.load() }
+    init {
+        // 首帧垫底：bootstrap 里 loadAll() 是异步的，推荐页 StatsRow 第一帧会先看到
+        // 空的收藏 / 历史而闪一下“已播 0 / 收藏 0”。构造时同步读一次 library.json
+        // （一个小文件）垫底，loadAll() 稍后仍会再读一遍刷新，两边是同一份数据。
+        runCatching { store.load() }.getOrNull()?.let { applyData(it) }
+    }
+
+    /** 把一份 LibraryData 写进三个 StateFlow（loadAll() 和构造垫底共用）。 */
+    private fun applyData(data: LibraryData) {
         // Force the built-in names to whatever the current model declares (so renames in the
         // model — e.g. "我的收藏" → "我喜欢的" — apply on next launch without a migration step).
         _love.value = data.love.copy(name = Playlist.LOVE_NAME)
         _history.value = data.history.copy(name = Playlist.HISTORY_NAME)
         _userLists.value = data.userLists
+    }
+
+    suspend fun loadAll() {
+        val data = withContext(Dispatchers.IO) { store.load() }
+        applyData(data)
     }
 
     fun isFavorite(trackId: String): Boolean = _love.value.tracks.any { it.id == trackId }

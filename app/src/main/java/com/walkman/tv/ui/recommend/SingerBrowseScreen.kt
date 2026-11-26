@@ -44,7 +44,9 @@ import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TvPill
 import com.walkman.tv.ui.search.ArtistCard
 import com.walkman.tv.ui.theme.AppColors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 
 /**
  * 歌手浏览页（首页“歌手”入口进来）：顶上一排地区 tab（全部 / 内地 / 港台 / 欧美 / 日本 / 韩国），
@@ -82,11 +84,27 @@ fun SingerBrowseOverlay(
         }
     }
 
+    // 流式拉一页：地区 tab 查到一个歌手就上一个，不用等 10 个全回来才画；
+    // 第一个歌手一到就把 loading 关掉。切 tab 会取消旧的收集，在途的搜索跟着停。
     suspend fun loadPage(p: Int) {
-        val result = runCatching { appContainer.artists.hotSingersPage(region, p) }.getOrNull() ?: return
-        singers = if (p == 0) result.singers else singers + result.singers
-        hasMore = result.hasMore
-        page = p
+        val base = if (p == 0) emptyList() else singers
+        var firstEmit = true
+        try {
+            appContainer.artists.hotSingersPageFlow(region, p).collect { pg ->
+                singers = base + pg.singers
+                hasMore = pg.hasMore
+                page = p
+                if (p == 0 && firstEmit) {
+                    firstEmit = false
+                    loading = false
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            // 拉不到就留着旧列表，调用方关 loading / loadingMore。
+        }
+        if (p == 0) loading = false
     }
     LaunchedEffect(region) {
         loading = true
@@ -111,6 +129,10 @@ fun SingerBrowseOverlay(
             loadPage(page + 1)
             loadingMore = false
         }
+    }
+    // 打开浏览页就后台预热 5 个地区 tab 的第 0 页，点过去直接出（已缓存的跳过，只跑一份）。
+    LaunchedEffect(Unit) {
+        appContainer.artists.preloadRegionPages()
     }
     // 打开就抢一次焦点落到“全部” tab 上，不然焦点还留在被盖住的首页上、页面看着像冻住。
     val firstTabFocus = remember { FocusRequester() }

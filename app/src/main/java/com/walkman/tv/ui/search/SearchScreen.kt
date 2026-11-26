@@ -43,15 +43,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -68,6 +69,7 @@ import com.walkman.tv.source.catalog.ArtistDetail
 import com.walkman.tv.source.catalog.ArtistInfo
 import com.walkman.tv.source.catalog.CatalogPage
 import com.walkman.tv.di.getLanIp
+import com.walkman.tv.ui.LocalTopBarFocus
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.components.AlbumGroup
 import com.walkman.tv.ui.components.EmptyHint
@@ -370,7 +372,7 @@ private fun ResultsPane(
     // 打开的歌手页（浮层：头像 + 热门歌 + 专辑）。
     var artistDetail by remember { mutableStateOf<ArtistInfo?>(null) }
     // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上：浮层关掉时焦点是被整个
-    // 清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
+    // 清空的，不记就回不到点下去的位置。
     var albumEntryKey by remember { mutableStateOf<String?>(null) }
     var artistEntryKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(albumDetail) { if (albumDetail == null) restore.restoreTo(albumEntryKey) }
@@ -413,9 +415,10 @@ private fun ResultsPane(
         songlists.isEmpty() && tracks.isEmpty() && artists.isEmpty() ->
             EmptyHint("没有找到结果", Modifier.fillMaxSize())
         else -> Box(modifier = Modifier.fillMaxSize()) {
-            // focusRestorer 只管方向键重新进入时回到上次那张卡片；浮层关掉后焦点是被
-            // 整个清空的，不会触发它，关掉后回哪张卡片由上面那套 entryKey + restore 管。
-            Column(modifier = Modifier.fillMaxSize().focusRestorer()) {
+            // 浮层关掉后回哪张卡片由上面那套 entryKey + restore 管；左边键盘按右进来落
+            // restore.topCardKey 那张卡片。这里不用 focusRestorer：它在节点脱离时抛
+            // IllegalStateException（2026-11-26 闪退根因），删掉。
+            Column(modifier = Modifier.fillMaxSize()) {
             if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
                 SectionHeader("歌手 (${artists.size})")
                 LazyRow(
@@ -721,6 +724,11 @@ fun AlbumDetailOverlay(
     // 当前焦点在曲目单的第几行（入口落位检查用：anchorFocus 经 entryFocuser 挂在第 0 行上）。
     var focusedRow by remember { mutableStateOf(-1) }
     val songListState = rememberLazyListState()
+    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
+    // 这个浮层的 TrackList 也是 trapFocus=true、没有 onExitUp，歌单第 0 行按上
+    // 会被吃掉、停在原地，到不了顶栏，和歌手页专辑卡片是同一个毛病。
+    val topBarFocus = LocalTopBarFocus.current
+    val focusManager = LocalFocusManager.current
     // 浮层入口：左边面板按右 / 顶栏按下时进浮层里的顶上内容（曲目单第 0 行；曲目单为空时是“返回”）。
     // 嵌套在歌手页上面时它后登记、在栈顶；关掉注销后栈顶回到歌手页。
     DisposableEffect(info) {
@@ -752,7 +760,16 @@ fun AlbumDetailOverlay(
             delay(100)
         }
     }
-    Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
+    Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()
+        // 曲目单拉不到时页上只有“返回” pill（focusedRow 保持 -1）：按上回顶栏。
+        // 有曲目单时歌单行上的按上走 TrackList 的 onExitUp，这里放行。
+        .onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            if (e.key != Key.DirectionUp) return@onPreviewKeyEvent false
+            if (tracks.isNotEmpty()) return@onPreviewKeyEvent false
+            if (topBarFocus?.invoke() == true) return@onPreviewKeyEvent true
+            focusManager.moveFocus(FocusDirection.Up)
+        }) {
         Column(modifier = Modifier.fillMaxSize()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -802,6 +819,12 @@ fun AlbumDetailOverlay(
                     initialFocus = true,
                     trapFocus = true,
                     onFocusedIndexChange = { focusedRow = it },
+                    onExitUp = {
+                        // 歌单第 0 行按上 → 回顶栏当前 tab（和歌手页专辑卡片按上同一条路）。
+                        if (topBarFocus?.invoke() != true) {
+                            focusManager.moveFocus(FocusDirection.Up)
+                        }
+                    },
                     listState = songListState,
                     entryFocuser = anchorFocus,
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
@@ -858,6 +881,11 @@ fun ArtistDetailOverlay(
     // 旧毛病（时灵时不灵）有一半是这个共用闹的：同一个请求器挂在两个节点上，请求落到
     // 哪个节点上看最后挂上的是谁，专辑区一切换、歌单行一重组，指向就变了。
     val songRow0Focus = remember { FocusRequester() }
+    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
+    // 专辑卡片在 TrackList 的 header 里，TrackList trapFocus 会把按上吃掉，
+    // 所以回顶栏要在这里（浮层这一层）拦，不能指望放行后空间搜索自己找到顶栏。
+    val topBarFocus = LocalTopBarFocus.current
+    val focusManager = LocalFocusManager.current
     val songListState = rememberLazyListState()
     // LazyRow 和 LazyColumn 共用 LazyListState（没有 rememberLazyRowState 这个函数）。
     val albumRowState = rememberLazyListState()
@@ -990,23 +1018,38 @@ fun ArtistDetailOverlay(
         onDispose { appContainer.events.unregisterOverlayEntry("artist_${artist.source.key}_${artist.id}") }
     }
     Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()
-        // 一页里按下的分流（浮层这一层拦，跑在 TrackList 自己的上下键处理器前面）：
-        // 专辑卡片按下来 → 歌单第 0 行；“查看全部”按钮按下来 → 第一张专辑卡片。
-        // 两头都一直在，一次请求就落上。歌单行上的上下键不在这里拦，走 TrackList。
+        // 一页里上下键的分流（浮层这一层拦，跑在 TrackList 自己的上下键处理器前面）：
+        // 按下：专辑卡片 → 歌单第 0 行；“查看全部”按钮 → 第一张专辑卡片。
+        // 按上：专辑区那一带（专辑卡片 / “查看全部”按钮 / “返回” pill，focusedRow < 0）
+        //   → 回顶栏当前 tab。不能放行给 TrackList：它 trapFocus=true，焦点在专辑卡片
+        //   上时 focusedIndex 是 -1，stepFocus 会把按键吃掉、把焦点拽进歌单第 0 行
+        //   （TrackRow.kt 里 focusedIndex < 0 那支），按上永远到不了顶栏——这就是
+        //   视频里第一张专辑卡片按上没反应的根因；onExitUp 只从歌单第 0 行触发，
+        //   专辑卡片按上根本走不到它。歌单行上的按上不在这里拦，走 TrackList
+        //   自己的 onExitUp（回专辑卡片），不动。
         // 专辑详情 / 全部专辑浮层开着时不拦，让里面那层自己处理。
         .onPreviewKeyEvent { e ->
             if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-            if (e.key != Key.DirectionDown) return@onPreviewKeyEvent false
             if (showAllAlbums || openAlbum != null) return@onPreviewKeyEvent false
-            if (albumCardFocused && songs.isNotEmpty()) {
-                runCatching { songRow0Focus.requestFocus() }
-                return@onPreviewKeyEvent true
+            when (e.key) {
+                Key.DirectionDown -> {
+                    if (albumCardFocused && songs.isNotEmpty()) {
+                        runCatching { songRow0Focus.requestFocus() }
+                        true
+                    } else if (viewAllFocused && albums.isNotEmpty()) {
+                        runCatching { anchorFocus.requestFocus() }
+                        true
+                    } else false
+                }
+                Key.DirectionUp -> {
+                    if (focusedRow >= 0) return@onPreviewKeyEvent false
+                    if (topBarFocus?.invoke() == true) return@onPreviewKeyEvent true
+                    // 当前 section 没有顶栏入口（不是推荐）时退回空间焦点搜索，
+                    // 跟排行榜那条路一样。
+                    focusManager.moveFocus(FocusDirection.Up)
+                }
+                else -> false
             }
-            if (viewAllFocused && albums.isNotEmpty()) {
-                runCatching { anchorFocus.requestFocus() }
-                return@onPreviewKeyEvent true
-            }
-            false
         }) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1302,6 +1345,11 @@ fun AllAlbumsOverlay(
     // 第一张卡片抢初始焦点（浮层入口也指它）；打开就抢，抢不上就重试。
     val firstCardFocus = remember { FocusRequester() }
     var firstCardFocused by remember { mutableStateOf(false) }
+    // 按上回顶栏用：当前焦点在第几张卡片上（第一排判断用）、“返回” pill 是不是正被聚焦。
+    var focusedAlbumIndex by remember { mutableStateOf(-1) }
+    var backFocused by remember { mutableStateOf(false) }
+    val topBarFocus = LocalTopBarFocus.current
+    val focusManager = LocalFocusManager.current
     LaunchedEffect(Unit) {
         for (attempt in 0 until 20) {
             if (firstCardFocused) break
@@ -1332,11 +1380,26 @@ fun AllAlbumsOverlay(
         onDispose { appContainer.events.unregisterOverlayEntry("allAlbums_${artist.source.key}_${artist.id}") }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()) {
+    Box(modifier = Modifier.fillMaxSize().background(AppColors.BgDeep).focusGroup()
+        // 第一排专辑卡片 / “返回”按上 → 回顶栏当前 tab。这个浮层没有 trapFocus，
+        // 按上本来不会被吃掉，但空间搜索可能落到下面那层歌手页的卡片上（浮层盖着的
+        // 内容还在焦点树里），所以第一排直接走顶栏入口，和歌手页同一条路；
+        // 其它排的按上放行，网格默认往上移一排。
+        .onPreviewKeyEvent { e ->
+            if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+            if (e.key != Key.DirectionUp) return@onPreviewKeyEvent false
+            if (openAlbum != null) return@onPreviewKeyEvent false
+            val firstRow = focusedAlbumIndex >= 0 &&
+                gridState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == focusedAlbumIndex }?.row == 0
+            if (!backFocused && !firstRow) return@onPreviewKeyEvent false
+            if (topBarFocus?.invoke() == true) return@onPreviewKeyEvent true
+            focusManager.moveFocus(FocusDirection.Up)
+        }) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 TvPill(
                     onClick = onBack,
+                    modifier = Modifier.onFocusChanged { backFocused = it.isFocused },
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                 ) {
                     Text("返回", fontSize = 12.sp)
@@ -1380,7 +1443,8 @@ fun AllAlbumsOverlay(
                                 .then(if (index == 0) Modifier
                                     .focusRequester(firstCardFocus)
                                     .onFocusChanged { firstCardFocused = it.isFocused }
-                                else Modifier),
+                                else Modifier)
+                                .onFocusChanged { if (it.isFocused) focusedAlbumIndex = index },
                             onClick = {
                                 albumEntryKey = albumKey
                                 if (onOpenAlbum != null) onOpenAlbum(album)

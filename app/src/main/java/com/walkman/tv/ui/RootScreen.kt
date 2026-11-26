@@ -23,6 +23,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.walkman.tv.ui.components.TvPill
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -33,6 +34,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
@@ -60,6 +62,14 @@ import com.walkman.tv.ui.settings.SettingsScreen
 import com.walkman.tv.ui.songlist.SonglistScreen
 import com.walkman.tv.ui.theme.AppColors
 import com.walkman.tv.playback.update.UpdateState
+
+/**
+ * 顶栏当前 tab 的焦点入口（歌手页 / 专辑详情 / 歌单详情等浮层里按上回顶栏用）：
+ * RootScreen 按当前 section 提供。TopNav 只给“推荐”挂了 FocusRequester，
+ * 所以只有 section == 推荐时才有值；其它 section 是 null，调用方退回空间焦点
+ * 搜索（跟排行榜那条路一样）。返回 true 表示已请求（调用方把按键吃掉）。
+ */
+val LocalTopBarFocus = staticCompositionLocalOf<(() -> Boolean)?> { null }
 
 @Composable
 fun RootScreen(modifier: Modifier = Modifier) {
@@ -201,7 +211,14 @@ fun RootScreen(modifier: Modifier = Modifier) {
             // exactly the remaining space after TopNav, which is what we actually want.
             // key(resetKey)：回到前台时整个内容区重建，浮层 / 滚动位置 / 各页内部状态
             // 全部回到初始值，落回首页（上面那个生命周期观察者会把 resetKey 加一）。
-            key(resetKey) {
+            // LocalTopBarFocus 在这里提供：浮层里的按上回顶栏走这个入口（只有推荐 tab
+            // 挂了 FocusRequester，见上面 LocalTopBarFocus 的注释）。
+            CompositionLocalProvider(
+                LocalTopBarFocus provides if (section == NavSection.Recommend) {
+                    { runCatching { recommendFocus.requestFocus() }; true }
+                } else null,
+            ) {
+                key(resetKey) {
                 Box(modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 18.dp)) {
                     val openPlayer = { showPlayer = true }
                     when (section) {
@@ -212,6 +229,7 @@ fun RootScreen(modifier: Modifier = Modifier) {
                         NavSection.Library -> LibraryScreen(onOpenPlayer = openPlayer)
                         NavSection.Settings -> SettingsScreen()
                     }
+                }
                 }
             }
         }

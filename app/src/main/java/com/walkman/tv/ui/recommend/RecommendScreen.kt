@@ -15,7 +15,6 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
@@ -65,6 +64,7 @@ import androidx.tv.material3.Text
 import com.walkman.tv.playback.LyricParser
 import com.walkman.tv.ui.NavSection
 import com.walkman.tv.ui.appContainer
+import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.components.Artwork
 import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TvFocusable
@@ -354,8 +354,18 @@ private fun RecommendGrid(
       appContainer.artists.hotSingers(com.walkman.tv.source.catalog.SingerRegion.ALL, 12)
     }.getOrDefault(emptyList())
   }
+  // 猜你喜欢：本机播放历史 + 收藏推（见 GuessYouLike.kt），没历史时热门榜兜底。
+  // 只读 libraryStore 的 StateFlow，不改它；历史 / 收藏 / 启用的音源一变就重算。
+  val history by appContainer.libraryStore.history.collectAsState()
+  val loved by appContainer.libraryStore.love.collectAsState()
+  var guessTracks by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<List<com.walkman.tv.data.model.Track>>(emptyList()) }
+  androidx.compose.runtime.LaunchedEffect(history, loved, settings.homeSources) {
+    guessTracks = runCatching {
+      buildGuessYouLike(appContainer.catalogs, appContainer.boards, settings.homeSources, history.tracks, loved.tracks)
+    }.getOrDefault(emptyList())
+  }
   // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上（不是回首页）：浮层关掉时
-  // 焦点是被整个清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
+  // 焦点是被整个清空的，不记就回不到点下去的位置。
   // restore 是 RecommendScreen 传下来的、左右两块共用的那张表（面板按右回网格也走它）。
   var detailEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
   var artistEntryKey by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
@@ -368,19 +378,34 @@ private fun RecommendGrid(
     if (openArtist == null && !artistFromBrowse) restore.restoreTo(artistEntryKey)
   }
   androidx.compose.runtime.LaunchedEffect(browseSingers) { if (!browseSingers) restore.restoreTo(browseEntryKey) }
-  // 首页打开时焦点落在最上面那张卡片上（现在是歌手区第一张，没有歌手时是推荐歌单第一张）。
+  // 首页打开时焦点落在最上面那张卡片上（现在是每日30首第一首，没有时是猜你喜欢第一首，
+  // 再没有是歌手区第一张，最后是推荐歌单第一张）。每日30首比歌单 / 排行榜晚到（单独拉的），
+  // 还在加载时等它最多约 3 秒，等到了直接落它上面；加载完了还没到（接口挂了）就按老顺序落，
+  // 不干等。有缓存冷启动时歌单 / 排行榜先画出来，焦点可能先落歌手卡，等每日30首到了按上
+  // 或面板按右能进，不强行抢焦点。
   // 数据是异步拉的，首张卡片可能还没排好版，重试到焦点真正落进网格里为止；焦点已经在
   // 网格里时就停，不把用户已移走的焦点拽回来。
   // 首张卡片的 FocusRequester 和“记住入口卡片”共用同一张表（restore.focuserFor），
   // 初始焦点和浮层关掉后的恢复落的是同一批卡片。首张卡片的 key 同时记到 restore.topCardKey
   // 上，左边面板按右就落到它上面（Yang 定：落最顶上，不是落上次那张）。
   var gridFocused by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
-  androidx.compose.runtime.LaunchedEffect(hotSingers, home) {
-    val firstKey: String? = when {
-      hotSingers.isNotEmpty() -> "singer_${hotSingers[0].source.key}_${hotSingers[0].id}"
-      home.heroes.isNotEmpty() -> "songlist_${home.heroes[0].songlist.source.key}_${home.heroes[0].songlist.id}"
-      home.recommendations.isNotEmpty() -> "songlist_${home.recommendations[0].source.key}_${home.recommendations[0].id}"
-      else -> null
+  androidx.compose.runtime.LaunchedEffect(hotSingers, home, guessTracks) {
+    if (gridFocused) return@LaunchedEffect
+    var firstKey: String? = null
+    for (i in 0 until 30) {
+      val d = appContainer.homeStore.state.value.daily30
+      if (d.isNotEmpty()) { firstKey = "daily30_${d[0].id}"; break }
+      if (!appContainer.homeStore.state.value.isLoading) break
+      delay(100)
+    }
+    if (firstKey == null) {
+      firstKey = when {
+        guessTracks.isNotEmpty() -> "guess_${guessTracks[0].id}"
+        hotSingers.isNotEmpty() -> "singer_${hotSingers[0].source.key}_${hotSingers[0].id}"
+        home.heroes.isNotEmpty() -> "songlist_${home.heroes[0].songlist.source.key}_${home.heroes[0].songlist.id}"
+        home.recommendations.isNotEmpty() -> "songlist_${home.recommendations[0].source.key}_${home.recommendations[0].id}"
+        else -> null
+      }
     }
     restore.topCardKey = firstKey
     val target = firstKey?.let { restore.focuserFor(it) }
@@ -428,9 +453,9 @@ private fun RecommendGrid(
 
   Box(modifier = modifier) {
     LazyVerticalGrid(
-      columns = GridCells.Adaptive(minSize = 180.dp),
+      columns = GridCells.Fixed(4),
       state = gridState,
-      modifier = Modifier.fillMaxSize().focusGroup().focusRestorer()
+      modifier = Modifier.fillMaxSize().focusGroup()
         .onFocusChanged { if (it.hasFocus) gridFocused = true },
       contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),
       horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -440,9 +465,42 @@ private fun RecommendGrid(
         settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
         home.isLoading && home.heroes.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
         else -> {
-          // 推荐页顺序（Yang 定）：歌手 → 已播/收藏 → 排行榜 → 推荐歌单。
+          // 推荐页顺序（Yang 定，2026-11-26 改）：每日30首 → 猜你喜欢 → 歌手 → 已播/收藏 → 排行榜 → 推荐歌单。
           val songlists = home.heroes.map { it.songlist } + home.recommendations
-          // 歌手入口放最顶部：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
+          // 每日30首放最前面：横排卡片（前 12 首），点卡片直接播，点“查看全部”进完整 30 首列表。
+          // 空的时候不画这段（接口全挂就当没有，不留空白标题）。
+          if (home.daily30.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              SectionHeader("每日30首", "每天更新", trailing = "查看全部") {
+                detail = DetailView("每日30首", "每天更新", home.daily30)
+              }
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              TrackCardRow(
+                tracks = home.daily30,
+                keyPrefix = "daily30",
+                restore = restore,
+                onPlay = { index -> playList(home.daily30, index); onOpenPlayer() },
+              )
+            }
+          }
+          // 猜你喜欢紧接着它：同上，横排卡片 + 查看全部。
+          if (guessTracks.isNotEmpty()) {
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              SectionHeader("猜你喜欢", null, trailing = "查看全部") {
+                detail = DetailView("猜你喜欢", null, guessTracks)
+              }
+            }
+            item(span = { GridItemSpan(maxLineSpan) }) {
+              TrackCardRow(
+                tracks = guessTracks,
+                keyPrefix = "guess",
+                restore = restore,
+                onPlay = { index -> playList(guessTracks, index); onOpenPlayer() },
+              )
+            }
+          }
+          // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
           if (hotSingers.isNotEmpty()) {
             item(span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader(
@@ -456,7 +514,6 @@ private fun RecommendGrid(
             }
             item(span = { GridItemSpan(maxLineSpan) }) {
               androidx.compose.foundation.lazy.LazyRow(
-                modifier = Modifier.focusRestorer(),
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
               ) {
@@ -693,6 +750,36 @@ private fun com.walkman.tv.data.model.SourceID.tintColor(): Color = when (this) 
   com.walkman.tv.data.model.SourceID.WY -> AppColors.SourceWy
   com.walkman.tv.data.model.SourceID.MG -> AppColors.SourceMg
   com.walkman.tv.data.model.SourceID.LOCAL -> AppColors.SourceLocal
+}
+
+/** 新区（每日30首 / 猜你喜欢）的横排歌曲卡片行：前 12 首，点卡片直接播整段队列。
+ *  key 带前缀（daily30_ / guess_），和歌单卡片的 key 不撞；焦点登记进 restore 那张表，
+ *  面板按右 / 浮层关掉恢复 / 初始焦点都走它。 */
+@Composable
+private fun TrackCardRow(
+  tracks: List<com.walkman.tv.data.model.Track>,
+  keyPrefix: String,
+  restore: com.walkman.tv.ui.components.OverlayFocusRestore,
+  onPlay: (Int) -> Unit,
+) {
+  androidx.compose.foundation.lazy.LazyRow(
+    horizontalArrangement = Arrangement.spacedBy(14.dp),
+    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+  ) {
+    itemsIndexed(tracks.take(12), key = { _, it -> "${keyPrefix}_${it.id}" }) { index, track ->
+      val cardKey = "${keyPrefix}_${track.id}"
+      Box(Modifier.width(168.dp)) {
+        GridAlbumCard(
+          picURL = track.picURL,
+          title = track.name,
+          subtitle = track.singer,
+          fallbackTint = track.source.tintColor(),
+          modifier = restore.modifierFor(cardKey),
+          onClick = { onPlay(index) },
+        )
+      }
+    }
+  }
 }
 
 /** 首页卡片网格里的卡片：封面按格子宽度自适应（正方形），下面是标题 + 副标题。 */

@@ -56,6 +56,7 @@ import com.walkman.tv.data.sync.NsdSyncDiscovery
 import com.walkman.tv.data.sync.SyncDirection
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -668,11 +669,45 @@ private fun DiagnosticsDialog(onDismiss: () -> Unit) {
         title = { Text("诊断记录", color = AppColors.TextPrimary) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    report ?: "暂无诊断记录（没有抓到过崩溃）。",
-                    color = AppColors.TextSecondary,
-                    fontSize = 12.sp,
-                )
+                val current = report
+                if (current == null) {
+                    Text(
+                        "暂无诊断记录（没有抓到过崩溃）。",
+                        color = AppColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                } else {
+                    // 堆栈放最前面、不用滚动就能看到：上次 Yang 只拍到对话框顶部，堆栈藏在
+                    // 下面翻不到。只露前 15 行（文件 + 行号都在里面），完整堆栈还在下面。
+                    val stackLines = current.substringAfter("堆栈：\n", "")
+                        .lineSequence().take(15).joinToString("\n")
+                    Text(
+                        "堆栈（前 15 行）",
+                        color = AppColors.Danger,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        stackLines.ifEmpty { "（无堆栈）" },
+                        color = AppColors.TextPrimary,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "完整记录",
+                        color = AppColors.TextSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        current,
+                        color = AppColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
             }
         },
         confirmButton = {

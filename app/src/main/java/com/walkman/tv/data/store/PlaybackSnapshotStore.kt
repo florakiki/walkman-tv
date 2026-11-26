@@ -30,6 +30,10 @@ class PlaybackSnapshotStore(context: Context) {
 
     suspend fun load(): PlaybackSnapshot = withContext(Dispatchers.IO) { store.load() }
 
+    /** 同步读：bootstrap 一启动就先读出来垫播放面板，不等脚本加载完再恢复。
+     *  文件极小（队列元数据），读一次没问题。配合 restoreSnapshot 用，见 AppContainer。 */
+    fun loadSync(): PlaybackSnapshot = store.load()
+
     suspend fun save(snapshot: PlaybackSnapshot) = withContext(Dispatchers.IO) {
         store.save(snapshot)
     }

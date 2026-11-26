@@ -60,12 +60,12 @@ class AppContainer(val appContext: Context) {
 
     val catalogs by lazy { Catalogs(catalogHttp) }
     /** 歌手 + 专辑详情（ArtistCatalog：QQ/KG/KW/WY 直连接口，Ki.js 里没有）。 */
-    val artists by lazy { Artists(catalogHttp, catalogs) }
+    val artists by lazy { Artists(catalogHttp, catalogs, java.io.File(appContext.filesDir, "hot-singers-cache.json")) }
     val hotSearch by lazy { com.walkman.tv.source.catalog.HotSearch(catalogHttp) }
     val boards by lazy { Boards(catalogHttp) }
     val songlists by lazy { Songlists(catalogHttp) }
     /** Backs the recommend (discover) right column — heroes / recommendations / boards. */
-    val homeStore by lazy { com.walkman.tv.ui.recommend.HomeStore(songlists, boards) }
+    val homeStore by lazy { com.walkman.tv.ui.recommend.HomeStore(songlists, boards, java.io.File(appContext.filesDir, "home-cache.json")) }
     val mvResolver by lazy { MvResolver(catalogHttp) }
 
     private val scriptHttp by lazy { ScriptHttpClient(httpClient) }
@@ -321,6 +321,13 @@ class AppContainer(val appContext: Context) {
                 hotSearchJson = { hotSearchJsonBlocking() },
                 sync = syncHandler,
             )
+        }
+        // 启动空白修法：先同步读上次的播放快照、只摆队列不续播（wasPlaying=false），
+        // 让左边面板第一帧就有歌，不等脚本加载完。脚本就绪后下面原来那次恢复再跑一遍
+        // （同队列是幂等的），上次在播时才真正 playAt() 续播。initPlayback() 必须已
+        // 调过（App.onCreate 里先调它再调 bootstrap），否则 playbackController 未初始化。
+        runCatching {
+            playbackController.restoreSnapshot(playbackSnapshotStore.loadSync().copy(wasPlaying = false))
         }
         appScope.launch {
             settingsStore.loadAll()

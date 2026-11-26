@@ -22,12 +22,15 @@ sealed interface ResolveOrigin {
     }
 }
 
-/** Resolved playable track (iOS `ResolvedTrack`). [warning] is a soft notice for the UI. */
+/** Resolved playable track (iOS `ResolvedTrack`). [warning] is a soft notice for the UI.
+ *  [attemptedSources] records which sources were tried to get this URL — log-only
+ *  (playback-failure diagnostics), never shown on screen. */
 data class ResolvedTrack(
     val url: String,
     val origin: ResolveOrigin,
     val quality: Quality,
     val warning: String? = null,
+    val attemptedSources: List<String> = emptyList(),
 )
 
 /** Implemented by the catalog layer so [OtherSourceFinder] can search other platforms. */

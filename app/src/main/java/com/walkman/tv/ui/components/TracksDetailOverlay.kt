@@ -18,7 +18,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -26,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Text
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.di.OverlayEntry
+import com.walkman.tv.ui.LocalTopBarFocus
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
@@ -56,6 +59,11 @@ fun TracksDetailOverlay(
     val entryFocuser = remember { FocusRequester() }
     var focusedRow by remember { mutableStateOf(-1) }
     val songListState = rememberLazyListState()
+    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
+    // 这个浮层的 TrackList 是 trapFocus=true、没有 onExitUp，歌单第 0 行按上
+    // 会被吃掉、停在原地，到不了顶栏，和歌手页专辑卡片是同一个毛病。
+    val topBarFocus = LocalTopBarFocus.current
+    val focusManager = LocalFocusManager.current
     DisposableEffect(title) {
         val entry = OverlayEntry(
             key = "tracksDetail",
@@ -108,6 +116,12 @@ fun TracksDetailOverlay(
             initialFocus = true,
             trapFocus = true,
             onFocusedIndexChange = { focusedRow = it },
+            onExitUp = {
+                // 歌单第 0 行按上 → 回顶栏当前 tab（和歌手页专辑卡片按上同一条路）。
+                if (topBarFocus?.invoke() != true) {
+                    focusManager.moveFocus(FocusDirection.Up)
+                }
+            },
             listState = songListState,
             entryFocuser = entryFocuser,
         ) { idx ->

@@ -22,8 +22,10 @@ import java.util.Locale
 object CrashDiagnostics {
     private const val DIR_NAME = "crash-diagnostics"
     private const val FILE_NAME = "last-crash.txt"
+    private const val FAILURE_FILE_NAME = "playback-failures.txt"
     private const val MAX_KEYS = 12
     private const val MAX_STACK_LINES = 80
+    private const val MAX_FAILURE_ENTRIES = 20
 
     /** 当前在哪个页面（RootScreen 的 section / 播放页 / 退出框）。 */
     @Volatile
@@ -78,15 +80,82 @@ object CrashDiagnostics {
         }
     }
 
-    /** 读最近一次的诊断记录（没有就是 null）。 */
+    /** 读最近一次的诊断记录（没有就是 null）。崩溃报告在前，播放失败记录附在后面，
+     *  同一个对话框里一起看，不另起查看入口。 */
     fun readLastReport(context: Context): String? {
-        val file = File(File(context.filesDir, DIR_NAME), FILE_NAME)
-        return runCatching { if (file.exists()) file.readText() else null }.getOrNull()
+        val dir = File(context.filesDir, DIR_NAME)
+        val crash = runCatching {
+            val file = File(dir, FILE_NAME)
+            if (file.exists()) file.readText() else null
+        }.getOrNull()
+        val failures = readFailures(context)
+        return when {
+            crash != null && failures != null -> crash + "\n播放失败记录：\n" + failures
+            crash != null -> crash
+            failures != null -> "播放失败记录：\n" + failures
+            else -> null
+        }
     }
 
-    /** 清掉诊断记录。 */
+    /** 清掉诊断记录（崩溃报告 + 播放失败记录一起清）。 */
     fun clearReport(context: Context) {
         runCatching { File(File(context.filesDir, DIR_NAME), FILE_NAME).delete() }
+        runCatching { File(File(context.filesDir, DIR_NAME), FAILURE_FILE_NAME).delete() }
+    }
+
+    /**
+     * 静默记一条播放失败（换源失败写日志那处用）：真播不了时屏幕上什么都不显示，
+     * 只记在这里。记哪首歌、当时在哪个页面、换了哪几个源、最后是什么原因。
+     * 不弹框、不 toast、不碰状态行。只留最近 [MAX_FAILURE_ENTRIES] 条。
+     */
+    fun recordPlaybackFailure(context: Context, song: String, sources: List<String>, reason: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[播放失败] $time")
+            appendLine("歌曲：$song")
+            appendLine("页面：$currentScreen")
+            appendLine("浮层：${currentOverlay ?: "无"}")
+            appendLine("换了这些源：${if (sources.isEmpty()) "未知" else sources.joinToString("、")}")
+            appendLine("原因：$reason")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
+     * 记一条音质核对（2026-11-26）：探头实测档位低于请求档位，或探头不认这个容器时，
+     * 记哪首歌、请求的是什么档位、实测到的是什么。跟播放失败写同一个文件、同一个查看
+     * 入口（设置 → 查看诊断记录），只留最近 [MAX_FAILURE_ENTRIES] 条。只在有落差时
+     * 记（实测与请求一致不记），不逐首刷屏。
+     */
+    fun recordQualityNote(context: Context, song: String, requested: String, measured: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[音质] $time")
+            appendLine("歌曲：$song")
+            appendLine("请求档位：$requested")
+            appendLine("实测：$measured")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
+    private fun appendFailureEntry(context: Context, entry: String) {
+        runCatching {
+            val dir = File(context.filesDir, DIR_NAME).apply { mkdirs() }
+            val file = File(dir, FAILURE_FILE_NAME)
+            val existing = runCatching { if (file.exists()) file.readText() else "" }.getOrDefault("")
+            val entries = existing.split("\n---\n").filter { it.isNotBlank() }.takeLast(MAX_FAILURE_ENTRIES - 1)
+            val all = (entries + entry).joinToString("\n---\n")
+            file.writeText(all + "\n")
+        }
+    }
+
+    private fun readFailures(context: Context): String? {
+        val file = File(File(context.filesDir, DIR_NAME), FAILURE_FILE_NAME)
+        return runCatching {
+            if (!file.exists()) return null
+            file.readText().ifBlank { null }
+        }.getOrNull()
     }
 
     /** 版本号从包管理器读（本项目没开 BuildConfig 生成，和 UpdateManager 同一套读法）。 */

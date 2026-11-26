@@ -42,7 +42,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -239,8 +238,9 @@ private fun MvBadge() {
  * the top, the first press scrolls back to row 0 and refocuses it; only when already at the
  * top does back fall through to the parent BackHandler (which navigates out one layer).
  *
- * Uses `Modifier.focusRestorer()` on the LazyColumn so the previously-focused row regains
- * focus when the user returns from the player overlay (or any other modal that took focus).
+ * 焦点恢复不走 `Modifier.focusRestorer()`（它在节点脱离时抛 IllegalStateException、会闪退，
+ * 2026-11-26 已定性）：播放器浮层关掉后由下面 playerClosed 那处恢复到上次点的那行；
+ * 其它浮层由调用方传的 entryFocuser / OverlayFocusRestore 管。
  * If [initialFocus] is true the list grabs focus on its first row on first composition —
  * used by overlays (songlist detail) where the list appears on top of something focused.
  */
@@ -417,14 +417,14 @@ fun TrackList(
 
     LazyColumn(
         state = effectiveListState,
-        // focusRestorer() remembers which row was last focused; when the player overlay closes
-        // and focus drops back into the list, it lands on that same row (instead of resetting).
+        // 播放器浮层关掉后回哪一行，由上面 playerClosed 那处 LaunchedEffect 管（记
+        // lastClickedIndex、滚回去再重试聚焦）；这里不用 focusRestorer，它在节点脱离时
+        // 抛 IllegalStateException（2026-11-26 闪退根因），删掉。
         // Explicit Up/Down: step focus through the rows' own FocusRequesters instead of
         // relying on spatial focus search. Up from row 0 / Down from the last row fall
         // through (return false) so focus can still leave the list normally.
         // 安全步进见上面的 stepFocus：目标行没显示出来时先滚出来再聚焦，不直接请求焦点。
         modifier = modifier
-            .focusRestorer()
             .onPreviewKeyEvent { e ->
                 if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (e.key) {
