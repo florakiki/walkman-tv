@@ -791,9 +791,12 @@ private fun fmt(ms: Long): String {
 }
 
 private suspend fun tryRequestFocus(target: FocusRequester) {
+  // requestFocus() returns Unit and never throws, so checking isSuccess is always true
+  // and the old early-return made this retry loop dead (it never retried). Retry
+  // unconditionally a few times; requesting focus on an already-focused node is a no-op.
   repeat(5) {
+    runCatching { target.requestFocus() }
     kotlinx.coroutines.delay(50)
-    if (runCatching { target.requestFocus() }.isSuccess) return
   }
 }
 

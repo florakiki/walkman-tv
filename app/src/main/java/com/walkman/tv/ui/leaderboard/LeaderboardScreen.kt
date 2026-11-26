@@ -132,7 +132,7 @@ fun LeaderboardScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                 loadingTracks -> LoadingState(Modifier.fillMaxSize())
                 tracks.isNotEmpty() -> {
                     val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
-                    TrackList(tracks, modifier = Modifier.fillMaxWidth().weight(1f), nowPlayingId = nowId, trapFocus = true) { idx ->
+                    TrackList(tracks, modifier = Modifier.fillMaxWidth().weight(1f), nowPlayingId = nowId) { idx ->
                         playList(tracks, idx); onOpenPlayer()
                     }
                 }

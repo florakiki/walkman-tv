@@ -909,7 +909,7 @@ fun ArtistDetailOverlay(
                 }
                 else -> {
                     if (!albumsCollapsed && albums.isNotEmpty()) {
-                        SectionHeader("专辑 (${albums.size})")
+                        SectionHeader("专辑 (${detail?.artist?.albumCount ?: artist.albumCount ?: albums.size})")
                         LazyRow(
                             state = albumRowState,
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -935,7 +935,7 @@ fun ArtistDetailOverlay(
                         Spacer(Modifier.padding(top = 8.dp))
                     }
                     if (songs.isNotEmpty()) {
-                        SectionHeader("全部歌曲 (${songs.size})")
+                        SectionHeader("全部歌曲 (${detail?.artist?.songCount ?: artist.songCount ?: songs.size})")
                         val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
                         Column(modifier = Modifier.fillMaxWidth().weight(1f)) {
                             TrackList(
@@ -944,7 +944,7 @@ fun ArtistDetailOverlay(
                                 nowPlayingId = nowId,
                                 initialFocus = true,
                                 trapFocus = true,
-                                onFocusedIndexChange = { focusedRow = it; if (it >= 1) albumsCollapsed = true },
+                                onFocusedIndexChange = { focusedRow = it; if (it >= 1) albumsCollapsed = true else if (it == 0) albumsCollapsed = false },
                                 onExitUp = {
                                     // 回专辑行：先把专辑区展开，等卡片组合好再把焦点落到第一张专辑卡片上。
                                     albumsCollapsed = false
