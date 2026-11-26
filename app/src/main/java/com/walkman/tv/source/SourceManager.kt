@@ -131,9 +131,9 @@ class SourceManager(
         if (alternatives.isEmpty()) return null
         val raced = alternatives.take(5)
         raced.forEach { attempted += it.source.displayName }
-        // 候选并行抢答：之前逐个串行解析，每个候选最多等 15 秒脚本超时，
-        // 5 个候选最坏 75 秒静默。现在 5 个同时解析，第一个成功的就用，其余取消，
-        // 最坏也就一个 15 秒的窗口。JsScriptRuntime 的 requestAction 用
+        // 候选并行抢答：之前逐个串行解析，每个候选最多等 25 秒脚本超时，
+        // 5 个候选最坏 125 秒静默。现在 5 个同时解析，第一个成功的就用，其余取消，
+        // 最坏也就一个 25 秒的窗口。JsScriptRuntime 的 requestAction 用
         // ConcurrentHashMap 按 UUID 挂起，ScriptHttpClient 每个请求是独立的
         // OkHttp Call，并行安全。
         return coroutineScope {
