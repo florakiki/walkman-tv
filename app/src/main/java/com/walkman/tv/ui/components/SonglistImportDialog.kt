@@ -49,7 +49,9 @@ import kotlinx.coroutines.launch
  * Flow:
  *   1. User pastes a share URL (or scans the QR to push from phone). Every keystroke runs
  *      [SonglistImporter.parse] / [SonglistImporter.pureIdOrNull] so the recognition status
- *      flips between "✓ 已识别" / source picker / nothing in real time.
+ *      flips between "✓ 已识别" / source picker / nothing in real time. A QR-pushed URL that
+ *      parses imports immediately (no extra TV press); a pure numeric ID only fills the
+ *      field (platform still has to be picked on TV).
  *   2. Optional 歌单名 override — same control as PlaylistNameDialog (with QR fallback).
  *   3. 确定导入 → [SonglistImporter.importPlaylist] off the UI thread. 900ms confirmation, then
  *      dismiss. Errors render inline as red text so the user can correct and retry.
@@ -78,11 +80,43 @@ fun SonglistImportDialog(onDismiss: () -> Unit) {
     val canImport = !importing && doneCount == null && (
         parsedRef != null || (pureId != null && manualSource != null)
         )
-    // QR-pushed URL replaces whatever's in the field.
+    // 确定导入：电视上按的用输入框里的识别结果；手机扫码推送来的直接传解析好的 ref。
+    val startImport: (SonglistRef?) -> Unit = startImport@{ explicitRef ->
+        if (importing || doneCount != null) return@startImport
+        val ref = explicitRef
+            ?: parsedRef
+            ?: pureId?.let { id -> manualSource?.let { s -> SonglistRef(s, id) } }
+            ?: return@startImport
+        importing = true
+        errorText = null
+        scope.launch {
+            runCatching {
+                SonglistImporter.importPlaylist(
+                    ref = ref,
+                    customName = customName.takeIf { it.isNotBlank() },
+                    songlists = appContainer.songlists,
+                    library = appContainer.libraryStore,
+                )
+            }.onSuccess { result ->
+                doneCount = result.count
+                importing = false
+                // 900ms grace so user sees the confirmation before dismiss.
+                delay(900)
+                onDismiss()
+            }.onFailure { e ->
+                errorText = e.localizedMessage ?: e.toString()
+                importing = false
+            }
+        }
+    }
+    // QR-pushed URL fills the field; if it parses to a songlist, import it directly so the
+    // user doesn't have to press 确定导入 on the TV as well.
     LaunchedEffect(Unit) {
         appContainer.events.qrSonglistUrl.collect { received ->
-            raw = received.trim()
+            val url = received.trim()
+            raw = url
             showQr = false
+            SonglistImporter.parse(url)?.let { startImport(it) }
         }
     }
 
@@ -240,35 +274,8 @@ fun SonglistImportDialog(onDismiss: () -> Unit) {
                     Text(if (doneCount != null) "完成" else "取消", fontSize = 13.sp)
                 }
                 if (doneCount == null) {
-                    val startImport: () -> Unit = startImport@{
-                        if (!canImport) return@startImport
-                        val ref = parsedRef ?: pureId?.let { id ->
-                            manualSource?.let { s -> SonglistRef(s, id) }
-                        } ?: return@startImport
-                        importing = true
-                        errorText = null
-                        scope.launch {
-                            runCatching {
-                                SonglistImporter.importPlaylist(
-                                    ref = ref,
-                                    customName = customName.takeIf { it.isNotBlank() },
-                                    songlists = appContainer.songlists,
-                                    library = appContainer.libraryStore,
-                                )
-                            }.onSuccess { result ->
-                                doneCount = result.count
-                                importing = false
-                                // 900ms grace so user sees the confirmation before dismiss.
-                                delay(900)
-                                onDismiss()
-                            }.onFailure { e ->
-                                errorText = e.localizedMessage ?: e.toString()
-                                importing = false
-                            }
-                        }
-                    }
                     TvPill(
-                        onClick = startImport,
+                        onClick = { startImport(null) },
                         selected = canImport,
                         contentPadding = PaddingValues(horizontal = 22.dp, vertical = 8.dp),
                     ) {
@@ -286,11 +293,13 @@ fun SonglistImportDialog(onDismiss: () -> Unit) {
     if (showQr) {
         val ip = remember { com.walkman.tv.di.getLanIp() }
         val port = appContainer.localServer?.boundPort
+        // 二维码里带本机 token：手机页面的 GET 和 POST 都要验 token，局域网里没扫码的推不进来。
+        val token = appContainer.syncPeerStore.data.value.deviceToken
         if (ip != null && port != null) {
             QrDialog(
-                url = "http://$ip:$port/songlist-url",
+                url = "http://$ip:$port/songlist-url?token=$token",
                 title = "扫码推送歌单链接",
-                subtitle = "在手机上粘贴歌单链接，发送后自动填入电视端输入框",
+                subtitle = "在手机上粘贴歌单链接，发送后电视直接导入",
                 onDismiss = { showQr = false },
             )
         } else {

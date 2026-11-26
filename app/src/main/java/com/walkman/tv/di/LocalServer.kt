@@ -32,8 +32,8 @@ interface SyncHandler {
  *   POST /api/script-file    - multipart field "file" -> events.qrScriptText
  *   GET  /playlist-name      - playlist name input form (Chinese-friendly via phone IME)
  *   POST /api/playlist-name  - field "name" -> events.qrPlaylistName
- *   GET  /songlist-url       - songlist URL paste form (avoids TV-side IME entirely)
- *   POST /api/songlist-url   - field "url"  -> events.qrSonglistUrl
+ *   GET  /songlist-url       - songlist URL paste form (?token= required, QR carries it)
+ *   POST /api/songlist-url   - field "url"  -> events.qrSonglistUrl (?token= required)
  *   GET  /api/sync/info      - sync peer info (no auth): {"name","deviceId","version"}
  *   GET  /api/sync/playlists - export local playlists as backup JSON (?token=)
  *   POST /api/sync/playlists - merge the posted backup JSON (?token=, raw JSON body)
@@ -88,7 +88,17 @@ class LocalServer private constructor(
         "/search" -> html(SEARCH_HTML)
         "/script" -> html(SCRIPT_HTML)
         "/playlist-name" -> html(PLAYLIST_NAME_HTML)
-        "/songlist-url" -> html(SONGLIST_URL_HTML)
+        "/songlist-url" -> {
+            // 歌单导入要扫码才能推：URL 里带 token（二维码里就有），没 token 不给表单，
+            // 免得局域网里随便谁猜到地址就能往电视上推链接。
+            val s = sync
+            if (s == null) {
+                notFound()
+            } else {
+                val token = session.parameters["token"]?.firstOrNull().orEmpty()
+                if (!s.checkToken(token)) unauthorized() else html(songlistUrlHtml(token))
+            }
+        }
         "" -> html(INDEX_HTML)
         else -> notFound()
     }
@@ -141,9 +151,15 @@ class LocalServer private constructor(
                 html(donePage("已发送：$name"))
             }
             "/api/songlist-url" -> {
-                val url = params["url"]?.firstOrNull().orEmpty().trim()
-                if (url.isNotEmpty()) events.postQrSonglistUrl(url)
-                html(donePage("已发送歌单链接"))
+                // 和 GET 一样要 token：表单 action 里带了二维码里的 token，没 token 不收。
+                val s = sync
+                if (s == null || !s.checkToken(params["token"]?.firstOrNull())) {
+                    unauthorized()
+                } else {
+                    val url = params["url"]?.firstOrNull().orEmpty().trim()
+                    if (url.isNotEmpty()) events.postQrSonglistUrl(url)
+                    html(donePage("已发送歌单链接"))
+                }
             }
             else -> notFound()
         }
@@ -216,7 +232,6 @@ class LocalServer private constructor(
               <div class="card"><a href="/search"><h2>🔍 搜索歌曲</h2></a></div>
               <div class="card"><a href="/script"><h2>📜 导入自定义音源</h2></a></div>
               <div class="card"><a href="/playlist-name"><h2>✏️ 输入歌单名</h2></a></div>
-              <div class="card"><a href="/songlist-url"><h2>🔗 推送歌单链接</h2></a></div>
             </body></html>
         """.trimIndent()
 
@@ -308,14 +323,16 @@ class LocalServer private constructor(
             </body></html>
         """.trimIndent()
 
-        private val SONGLIST_URL_HTML = """
+        // token 由 GET /songlist-url 的 ?token= 传进来（二维码里就有），嵌进表单 action，
+        // POST 时一起带回来验。token 是 32 位 hex，escapeHtml 只是防万一。
+        private fun songlistUrlHtml(token: String): String = """
             <!doctype html><html><head><meta charset="utf-8">
             <meta name="viewport" content="width=device-width,initial-scale=1">
             <title>推送歌单 · KITV音乐</title>$PAGE_CSS</head>
             <body>
               <h2>推送歌单链接</h2>
               <p>从酷我 / 酷狗 / QQ 音乐 / 网易云分享一个歌单链接（或纯数字 ID），粘进来发送给电视，电视会自动识别并导入。</p>
-              <form class="card" method="POST" action="/api/songlist-url">
+              <form class="card" method="POST" action="/api/songlist-url?token=${escapeHtml(token)}">
                 <textarea name="url" placeholder="例如 https://music.163.com/playlist?id=2034742057" rows="3" autofocus></textarea>
                 <button>发送到电视</button>
               </form>
