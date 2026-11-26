@@ -810,13 +810,20 @@ private fun MvQueueDrawer(
 ) {
   val listState = rememberLazyListState()
   val firstFocus = remember { FocusRequester() }
+  // 抽屉里有没有焦点：重试只在焦点还没进抽屉时继续，一旦落上（或用户自己移进来了）
+  // 就停，不把用户随后移走的焦点抢回来。
+  var drawerHasFocus by remember { mutableStateOf(false) }
 
   LaunchedEffect(visible) {
     if (visible && queue.isNotEmpty()) {
       val target = currentIndex.coerceIn(0, queue.size - 1)
       runCatching { listState.scrollToItem(target) }
-      delay(80)
-      runCatching { firstFocus.requestFocus() }
+      // 单次请求在慢电视上可能落在当前行还没组合好之前：重试几次直到落上。
+      repeat(5) {
+        if (drawerHasFocus) return@LaunchedEffect
+        delay(80)
+        runCatching { firstFocus.requestFocus() }
+      }
     }
   }
 
@@ -826,7 +833,7 @@ private fun MvQueueDrawer(
     exit = slideOutHorizontally(targetOffsetX = { it }),
     modifier = modifier,
   ) {
-    Box(modifier = Modifier.fillMaxHeight().width(360.dp).background(AppColors.BgPanel.copy(alpha = 0.95f))) {
+    Box(modifier = Modifier.fillMaxHeight().width(360.dp).background(AppColors.BgPanel.copy(alpha = 0.95f)).onFocusChanged { drawerHasFocus = it.hasFocus }) {
       Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Text(
           "播放队列 (${queue.size})",

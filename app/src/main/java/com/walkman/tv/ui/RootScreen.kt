@@ -47,6 +47,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.tv.material3.Text
 import com.walkman.tv.ui.components.TopNav
+import com.walkman.tv.di.CrashDiagnostics
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -77,20 +78,33 @@ fun RootScreen(modifier: Modifier = Modifier) {
     // 按 Yang 的意思改：进 App 直接是首页，不留上次的浮层。只在“从后台回来”时清，
     // 第一次启动不触发；退出框点确定是杀进程，冷启动本来就是首页。播放不受影响
     // （播放器在 AppContainer 里，不跟着界面走）。
+    // 2026-11-26 补：只在 ON_START 清不够——96b7cc5 那版的清理在 052aeef 里确实在
+    // （RootScreen 后来没人动过，8d33ff7 只改了 ArtistCatalog），冷启动 / 按 Home
+    // 回来 / 最近任务回来这三条路走代码也都盖住了，但 Yang 还是看到旧歌手页。
+    // 漏就漏在清理只绑在 ON_START 上：回前台那条路只要某一步没走到 ON_START
+    // （观察者注册时机、电视休眠唤醒的生命周期 quirks），旧页面就还留在那。
+    // 改成去后台（ON_STOP）那一下就清：回来之前界面已经是首页，不管走哪条路回来，
+    // 第一帧就是首页；ON_START 再清一次当兜底。
     val activity = LocalContext.current as? ComponentActivity
     var resetKey by remember { mutableIntStateOf(0) }
     DisposableEffect(activity) {
         if (activity == null) return@DisposableEffect onDispose {}
         var wentBackground = false
+        fun resetToHome() {
+            section = NavSection.Recommend
+            showPlayer = false
+            showExitDialog = false
+            resetKey++
+        }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_STOP -> wentBackground = true
+                Lifecycle.Event.ON_STOP -> {
+                    wentBackground = true
+                    resetToHome()
+                }
                 Lifecycle.Event.ON_START -> if (wentBackground) {
                     wentBackground = false
-                    section = NavSection.Recommend
-                    showPlayer = false
-                    showExitDialog = false
-                    resetKey++
+                    resetToHome()
                 }
                 else -> {}
             }
@@ -109,6 +123,15 @@ fun RootScreen(modifier: Modifier = Modifier) {
     }.collectAsState(initial = NavPlaybackBits(null, null, false))
 
     LaunchedEffect(Unit) { runCatching { recommendFocus.requestFocus() } }
+
+    // 诊断记录：记当前在哪个页面（崩溃时写进诊断文件）。
+    LaunchedEffect(section, showPlayer, showExitDialog) {
+        CrashDiagnostics.currentScreen = when {
+            showExitDialog -> "退出确认框"
+            showPlayer -> "播放页"
+            else -> section.label
+        }
+    }
 
     // In-app update: the moment a background download finishes — on ANY tab — hand the APK to
     // the system installer. Lives at the root so it fires regardless of which screen shows.
@@ -155,7 +178,16 @@ fun RootScreen(modifier: Modifier = Modifier) {
             ) {
                 TopNav(
                     active = section,
-                    onSelect = { section = it },
+                    onSelect = {
+                        if (it == section) {
+                            // 点的是当前 tab：关掉这页的浮层、回到这页顶部。歌手页开着时
+                            // 点推荐/搜索，section 没变、浮层不会自己关，看着就是
+                            // “进首页还是显示歌手页”——这是 ON_START 清理之外的另一条漏路。
+                            resetKey++
+                        } else {
+                            section = it
+                        }
+                    },
                     recommendFocusRequester = recommendFocus,
                     nowPlayingTitle = navBits.title,
                     nowPlayingPicURL = navBits.picURL,

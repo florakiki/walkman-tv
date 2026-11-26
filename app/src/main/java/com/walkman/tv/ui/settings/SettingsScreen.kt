@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.sp
 import androidx.tv.material3.Icon
 import androidx.tv.material3.Text
 import com.walkman.tv.data.model.Quality
+import com.walkman.tv.di.CrashDiagnostics
 import com.walkman.tv.di.getLanIp
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.components.QrDialog
@@ -85,6 +86,7 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
     var url by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var showQr by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<com.walkman.tv.data.model.UserScript?>(null) }
 
     // System file picker (SAF) for .js scripts.
@@ -572,6 +574,19 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )
+            Spacer(Modifier.height(8.dp))
+            TvPill(
+                onClick = { showDiagnostics = true },
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp),
+            ) {
+                Text("查看诊断记录", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "App 闪退时会自动记下当时的页面、焦点、按键和报错，只保存在本机，不上传。下次再闪退，进来看这里就知道是哪一步出的问题。注意：只能记 Kotlin 层的崩溃，原生层闪退记不到。",
+                color = AppColors.TextMuted,
+                fontSize = 11.sp,
+            )
         }
 
         UpdateSection()
@@ -620,6 +635,10 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    if (showDiagnostics) {
+        DiagnosticsDialog(onDismiss = { showDiagnostics = false })
+    }
+
     if (showDownloadBrowser) {
         FolderBrowser(
             onPick = { dir ->
@@ -634,6 +653,47 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
             onCancel = { showDownloadBrowser = false },
         )
     }
+}
+
+/**
+ * 诊断记录弹窗：显示最近一次崩溃的记录（时间、页面、浮层、焦点、按键、正在播的歌、
+ * 报错堆栈），没有记录就说没有。记录只存在本机文件里，清除按钮删掉它。
+ */
+@Composable
+private fun DiagnosticsDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    var report by remember { mutableStateOf(CrashDiagnostics.readLastReport(context)) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("诊断记录", color = AppColors.TextPrimary) },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    report ?: "暂无诊断记录（没有抓到过崩溃）。",
+                    color = AppColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) {
+                Text("关闭", color = AppColors.AccentGreen)
+            }
+        },
+        dismissButton = {
+            if (report != null) {
+                androidx.compose.material3.TextButton(onClick = {
+                    CrashDiagnostics.clearReport(context)
+                    report = null
+                }) {
+                    Text("清除记录", color = AppColors.Danger)
+                }
+            }
+        },
+        containerColor = AppColors.BgPanel,
+        titleContentColor = AppColors.TextPrimary,
+        textContentColor = AppColors.TextSecondary,
+    )
 }
 
 /** Whether we can write to arbitrary folders with java.io.File right now. */

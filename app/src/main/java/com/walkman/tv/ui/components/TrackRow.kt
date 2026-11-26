@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.PI
 import kotlin.math.sin
 import androidx.tv.material3.Text
+import com.walkman.tv.di.CrashDiagnostics
 import com.walkman.tv.data.model.Track
 import com.walkman.tv.ui.theme.AppColors
 import kotlinx.coroutines.delay
@@ -436,6 +437,7 @@ fun TrackList(
                 .onFocusChanged {
                     if (it.isFocused) {
                         focusedIndex = index
+                        CrashDiagnostics.noteFocus("歌曲「${track.name}」第 ${index + 1} 行")
                         onFocusedIndexChange?.invoke(index)
                     }
                 }

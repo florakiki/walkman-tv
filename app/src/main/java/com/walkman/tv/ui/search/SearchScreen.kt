@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -40,6 +41,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,6 +68,7 @@ import com.walkman.tv.ui.components.EmptyHint
 import com.walkman.tv.ui.components.LoadingState
 import com.walkman.tv.ui.components.MediaCard
 import com.walkman.tv.ui.components.QrDialog
+import com.walkman.tv.ui.components.OverlayFocusRestore
 import com.walkman.tv.ui.components.rememberOverlayFocusRestore
 import com.walkman.tv.ui.components.TrackList
 import com.walkman.tv.ui.components.TracksDetailOverlay
@@ -90,6 +97,23 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
     var hotColumns by remember { mutableStateOf<List<com.walkman.tv.source.catalog.HotSearchColumn>>(emptyList()) }
     // 搜索结果列表在第 0 行按上时的出口：回到上面的分类 tab 行（列表里焦点不外漏）。
     val tabRowFocus = remember { FocusRequester() }
+    // 搜索结果区的焦点恢复（歌手/歌单/专辑卡片 + 歌曲第 0 行共用）：提到这一层，
+    // 左边键盘按右要送焦点进结果区时、和 ResultsPane 里浮层关掉回卡片时都用同一套。
+    val restore = rememberOverlayFocusRestore()
+    // 结果区各列表的滚动状态：提到这一层，键盘按右重试时先把结果区滚回顶部
+    // （最顶上那张卡片可能被滚出屏幕、没组合，请求焦点落不上），再重试。
+    val artistRowState = rememberLazyListState()
+    val songlistRowState = rememberLazyListState()
+    val albumRowState = rememberLazyListState()
+    val tracksListState = rememberLazyListState()
+    // 换了一批新搜索结果就把结果区滚回顶部：新结果的第一张卡片要在屏幕上，
+    // 不然键盘按右同步试最顶上那张会落不上。
+    LaunchedEffect(tracks, artists, songlists) {
+        runCatching { artistRowState.scrollToItem(0) }
+        runCatching { songlistRowState.scrollToItem(0) }
+        runCatching { albumRowState.scrollToItem(0) }
+        runCatching { tracksListState.scrollToItem(0) }
+    }
 
     // Load hot-search words once when the screen first appears (before any search).
     LaunchedEffect(Unit) {
@@ -150,7 +174,46 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
 
     Row(modifier = modifier.fillMaxSize().padding(top = 8.dp)) {
         // LEFT: search input + virtual keypad
-        Column(modifier = Modifier.width(360.dp).fillMaxHeight().padding(end = 12.dp)) {
+        Column(
+            // 左边键盘按右，一定要进右边搜索结果区：键盘键在下面几行，右边卡片不在同一条
+            // 横线上，空间焦点搜索过不去、会漏到下面那层（底部播放条那一带），看着就是
+            // “往右还是跑到底层去”。这里显式传焦点，不走空间搜索（和首页左边面板按右同一套）。
+            // 落点：有歌手卡片时是第一张歌手卡片，没有时是歌单/专辑第一张、再没有是歌曲第 0 行；
+            // 浮层开着（专辑详情/歌手页）时先进浮层顶上内容。按键吃掉的前提是焦点真的送出去了：
+            // 先同步试一次，落上就吃掉；同步落不上时后台把结果区滚回顶部再重试到落上为止，
+            // 绝不出现“按键吃掉了、焦点原地不动”；只有根本没有目标（还没搜出结果）时才放行。
+            // 按左不动：这里只拦方向键右。
+            modifier = Modifier.width(360.dp).fillMaxHeight().padding(end = 12.dp)
+                .onPreviewKeyEvent { e ->
+                    if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    if (e.key != Key.DirectionRight) return@onPreviewKeyEvent false
+                    // 1. 浮层开着 → 进浮层里的顶上内容。
+                    val entry = appContainer.events.topOverlayEntry
+                    if (entry != null) {
+                        runCatching { entry.focuser.requestFocus() }
+                        if (entry.isFocused()) return@onPreviewKeyEvent true
+                        scope.launch { entry.retry?.invoke() }
+                        return@onPreviewKeyEvent true
+                    }
+                    // 2. 没浮层 → 同步试最顶上那张卡片，再试上次那张卡片。
+                    if (restore.tryFocusSync(restore.topCardKey)) return@onPreviewKeyEvent true
+                    if (restore.tryFocusSync(restore.lastFocusedKey)) return@onPreviewKeyEvent true
+                    // 3. 同步都落不上：不是没有目标，是目标卡片还没组合好（结果区滚下去了、
+                    //    最顶上那张在屏幕外）。先把结果区滚回顶部再重试到落上为止；
+                    //    只有根本没有目标（topCardKey 和 lastFocusedKey 都是空）时才放行。
+                    val topKey = restore.topCardKey
+                    val key = topKey ?: restore.lastFocusedKey ?: return@onPreviewKeyEvent false
+                    scope.launch {
+                        runCatching { artistRowState.scrollToItem(0) }
+                        runCatching { songlistRowState.scrollToItem(0) }
+                        runCatching { albumRowState.scrollToItem(0) }
+                        runCatching { tracksListState.scrollToItem(0) }
+                        restore.restoreTo(key)
+                        if (topKey != null) restore.restoreTo(restore.lastFocusedKey)
+                    }
+                    true
+                },
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(modifier = Modifier.weight(1f)) { SearchInputBox(query) }
                 Spacer(Modifier.width(8.dp))
@@ -205,6 +268,11 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                     }
                 },
                 onSongsExitUp = { runCatching { tabRowFocus.requestFocus() } },
+                restore = restore,
+                artistRowState = artistRowState,
+                songlistRowState = songlistRowState,
+                albumRowState = albumRowState,
+                tracksListState = tracksListState,
             )
         }
     }
@@ -283,6 +351,12 @@ private fun ResultsPane(
     onPickHot: (String) -> Unit = {},
     /** 歌曲列表在第 0 行按上时的出口（回到上面的分类 tab 行），不设就停在第 0 行。 */
     onSongsExitUp: (() -> Unit)? = null,
+    /** 左边键盘按右和浮层关掉回卡片共用的焦点恢复（SearchScreen 那一层建的）。 */
+    restore: OverlayFocusRestore,
+    artistRowState: LazyListState,
+    songlistRowState: LazyListState,
+    albumRowState: LazyListState,
+    tracksListState: LazyListState,
 ) {
     val history by appContainer.searchHistoryStore.items.collectAsState()
     // 打开的专辑详情（浮层盖在结果区上，点里面的歌直接播）。换一批搜索结果就关掉，别留着旧专辑。
@@ -291,13 +365,29 @@ private fun ResultsPane(
     var artistDetail by remember { mutableStateOf<ArtistInfo?>(null) }
     // 进浮层之前记住点的那张卡片，出来时焦点回到那张卡片上：浮层关掉时焦点是被整个
     // 清空的，下面的 focusRestorer 不会在这一下触发，不记就回不到点下去的位置。
-    val restore = rememberOverlayFocusRestore()
     var albumEntryKey by remember { mutableStateOf<String?>(null) }
     var artistEntryKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(albumDetail) { if (albumDetail == null) restore.restoreTo(albumEntryKey) }
     LaunchedEffect(artistDetail) { if (artistDetail == null) restore.restoreTo(artistEntryKey) }
     LaunchedEffect(tracks) { albumDetail = null; albumEntryKey = null }
     LaunchedEffect(artists) { artistDetail = null; artistEntryKey = null }
+    // 结果区最顶上那张卡片（左边键盘按右的落点）：按屏幕上从上到下的顺序——
+    // 歌手卡片 → 歌单卡片 → 专辑卡片 → 歌曲第 0 行；只算当前 tab 显示的那几类。
+    LaunchedEffect(tab, artists, songlists, albums, tracks) {
+        restore.topCardKey = when {
+            (tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty() ->
+                "${artists.first().source.key}_${artists.first().id}"
+            (tab == SearchTab.ALL || tab == SearchTab.PLAYLISTS) && songlists.isNotEmpty() -> {
+                val first = songlists.distinctBy { it.id + "_" + it.source.key }.first()
+                "${first.id}_${first.source.key}"
+            }
+            (tab == SearchTab.ALL || tab == SearchTab.ALBUMS) && albums.isNotEmpty() ->
+                "${albums.first().source.key}_${albums.first().name}"
+            (tab == SearchTab.ALL || tab == SearchTab.SONGS) && tracks.isNotEmpty() ->
+                "search_tracks_row0"
+            else -> null
+        }
+    }
     when {
         loading -> LoadingState(Modifier.fillMaxSize())
         !searched -> {
@@ -323,6 +413,7 @@ private fun ResultsPane(
             if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
                 SectionHeader("歌手 (${artists.size})")
                 LazyRow(
+                    state = artistRowState,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
@@ -341,15 +432,18 @@ private fun ResultsPane(
                 SectionHeader("歌单 (${songlists.size})")
                 val uniqueSonglists = remember(songlists) { songlists.distinctBy { it.id + "_" + it.source.key } }
                 LazyRow(
+                    state = songlistRowState,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
                     items(uniqueSonglists, key = { it.id + "_" + it.source.key }) { sl ->
+                        val slKey = "${sl.id}_${sl.source.key}"
                         Box(modifier = Modifier.width(140.dp)) {
                             MediaCard(
                                 title = sl.name,
                                 picURL = sl.picURL,
                                 subtitle = sl.playCount?.let { "▶ $it" },
+                                modifier = restore.modifierFor(slKey),
                                 onClick = { onPickSonglist(sl) },
                             )
                         }
@@ -360,6 +454,7 @@ private fun ResultsPane(
             if ((tab == SearchTab.ALL || tab == SearchTab.ALBUMS) && albums.isNotEmpty()) {
                 SectionHeader("专辑 (${albums.size})")
                 LazyRow(
+                    state = albumRowState,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     contentPadding = PaddingValues(vertical = 4.dp),
                 ) {
@@ -387,6 +482,8 @@ private fun ResultsPane(
                     nowPlayingId = nowId,
                     trapFocus = true,
                     onExitUp = onSongsExitUp,
+                    listState = tracksListState,
+                    entryFocuser = restore.focuserFor("search_tracks_row0"),
                     onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
                 )
             }

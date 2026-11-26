@@ -55,7 +55,59 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
             }
             return
         }
-        list.filter { it.enabled }.forEach { sourceManager.load(it) }
+        // 已有 scripts.json：包里带的内置源可能比已存的上一版新（电视上次启动种的是旧版），
+        // 见 upgradeBundledIfNeeded。升级失败时返回原列表，旧版不动。
+        val effective = runCatching { upgradeBundledIfNeeded(list) }.getOrElse {
+            android.util.Log.w("ScriptStore", "bundled Ki.js upgrade failed", it)
+            list
+        }
+        effective.filter { it.enabled }.forEach { sourceManager.load(it) }
+    }
+
+    /**
+     * 内置源升级：包里带的 Ki.js（src/debug/assets，下个版本换了新脚本）比已存的上一版
+     * 新时，把已存的上一版内置源换成包里新版。只认上一版内置源（@author 是 hello world
+     * 的那个），别的用户脚本一律不动；用户自己删掉内置源后不再补种。
+     *
+     * 换法：新版沿用旧 id（SourceManager 按 id 去重，位置、启用状态都原地不动），
+     * 先验证新版能加载（QuickJS 里跑起来、拿到 capabilities），成功了再换；
+     * 旧版原来是启用状态才进 runtime，原来是禁用就不进，只换列表里的记录。
+     * 新版和已存的一样（已经升过了）就不动。返回升级后的有效列表。
+     */
+    private suspend fun upgradeBundledIfNeeded(list: List<UserScript>): List<UserScript> {
+        val old = list.firstOrNull { it.author == "hello world" } ?: return list
+        // 内置源只进 debug 测试版：和上面首次种源同一道门，release 包里没有这个文件。
+        val debuggable = (context.applicationInfo.flags and
+            android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!debuggable) return list
+        val raw = context.assets.open("script/Ki.js").bufferedReader().use { it.readText() }
+        val bundled = KitvAes.decryptIfPrefixed(raw)
+        if (bundled == old.rawScript) return list // 已经是最新，不动
+        val meta = parseHeader(bundled)
+        val upgraded = UserScript(
+            id = old.id, // 沿用旧 id：位置、启用状态都原地不动
+            name = meta["name"] ?: "未命名脚本",
+            description = meta["description"] ?: "",
+            version = meta["version"] ?: "",
+            author = meta["author"] ?: "",
+            homepage = meta["homepage"] ?: "",
+            rawScript = bundled,
+            enabled = old.enabled,
+        )
+        if (old.enabled) {
+            // 先验证新版能加载，成功了再换；失败留着旧版不动（loadAll 随后会按原列表加载旧版）。
+            // load() 按 id 先过滤再加：成功时旧 runtime 已被新版顶掉，不用再卸。
+            val result = sourceManager.load(upgraded)
+            if (result.isFailure) {
+                android.util.Log.w("ScriptStore", "bundled Ki.js upgrade load failed, keeping old")
+                return list
+            }
+        }
+        val updated = list.map { if (it.id == old.id) upgraded else it }
+        _scripts.value = updated
+        persist()
+        android.util.Log.i("ScriptStore", "bundled Ki.js upgraded: ${old.name} -> ${upgraded.name}")
+        return updated
     }
 
     /** Result of [import]: [replaced] is the older copy of the same script (same name + author)

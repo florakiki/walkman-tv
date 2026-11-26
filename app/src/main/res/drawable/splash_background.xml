@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- KITV音乐启动图：直接用极光K2原图（drawable-nodpi/kitv_music_logo.png，与原图文件字节一致，
-     未抠底、未改色、未重画），居中放在浅白底 #F4F6F4 上。上一轮 1920x1080 的加工版已删掉。 -->
+<!-- KITV音乐启动图：极光带那张（Yang 2026-11-26 挑中第 2 张），转成 1920x1080 PNG
+     （原图是 2240x1120，按比例缩到 1920x960、上下各补 60px #F4F6F4，不拉伸不变形），
+     居中原尺寸放在浅白底 #F4F6F4 上；1080p 电视上正好满屏。 -->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/bg_deep" />
-    <item
-        android:width="360dp"
-        android:height="360dp"
-        android:gravity="center">
+    <item android:gravity="center">
         <bitmap
-            android:src="@drawable/kitv_music_logo"
-            android:gravity="fill" />
+            android:src="@drawable/splash_aurora"
+            android:gravity="center" />
     </item>
 </layer-list>

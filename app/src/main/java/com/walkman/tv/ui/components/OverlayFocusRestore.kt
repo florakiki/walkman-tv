@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import com.walkman.tv.di.CrashDiagnostics
 import kotlinx.coroutines.delay
 
 /**
@@ -52,7 +53,10 @@ class OverlayFocusRestore {
     fun modifierFor(key: String): Modifier = Modifier
         .focusRequester(focuserFor(key))
         .onFocusChanged {
-            if (it.isFocused) { focusedKeys.add(key); lastFocusedKey = key } else focusedKeys.remove(key)
+            if (it.isFocused) {
+                focusedKeys.add(key); lastFocusedKey = key
+                CrashDiagnostics.noteFocus("卡片 $key")
+            } else focusedKeys.remove(key)
         }
 
     /**

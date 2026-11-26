@@ -47,6 +47,8 @@ import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.focus.onFocusChanged
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -411,7 +413,16 @@ private fun PlaylistDetailPane(
     onDelete: (() -> Unit)?,
 ) {
     val playFocus = remember { FocusRequester() }
-    LaunchedEffect(playlist.id) { runCatching { playFocus.requestFocus() } }
+    // 详情刚打开时焦点要落在“播放全部”上：静态头部，单次请求一般能落上；慢电视上
+    // 万一第一次没落上就重试几次。焦点一旦进了详情页就停，不抢用户随后移走的焦点。
+    var paneHasFocus by remember { mutableStateOf(false) }
+    LaunchedEffect(playlist.id) {
+        repeat(5) {
+            if (paneHasFocus) return@LaunchedEffect
+            delay(50)
+            runCatching { playFocus.requestFocus() }
+        }
+    }
     var showBatchDownload by remember { mutableStateOf(false) }
     val refreshingIds by com.walkman.tv.playback.imports.SonglistImporter.refreshing.collectAsState()
     val refreshing = playlist.id in refreshingIds
@@ -424,7 +435,7 @@ private fun PlaylistDetailPane(
             .rescannableFolders(playlist, appContainer.localMusicStore).isNotEmpty()
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(modifier = Modifier.fillMaxSize().onFocusChanged { paneHasFocus = it.hasFocus }) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 12.dp)) {
             CoverMosaic(
                 urls = playlist.tracks.take(4).map { it.picURL },

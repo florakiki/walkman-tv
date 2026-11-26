@@ -85,8 +85,12 @@ class AppEvents {
     fun registerOverlayEntry(entry: OverlayEntry) {
         overlayEntries.removeAll { it.key == entry.key }
         overlayEntries.add(entry)
+        CrashDiagnostics.currentOverlay = entry.key
     }
-    fun unregisterOverlayEntry(key: String) { overlayEntries.removeAll { it.key == key } }
+    fun unregisterOverlayEntry(key: String) {
+        overlayEntries.removeAll { it.key == key }
+        CrashDiagnostics.currentOverlay = overlayEntries.lastOrNull()?.key
+    }
     /** 最上层开着的浮层的入口（没有浮层开着就是 null）。 */
     val topOverlayEntry: OverlayEntry? get() = overlayEntries.lastOrNull()
 
