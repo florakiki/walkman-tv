@@ -268,8 +268,17 @@ fun TrackList(
     /** 浮层入口用的请求器：挂在第 0 行上。左边面板按右 / 顶栏按下时，
      *  浮层通过它把焦点送到列表最上面那一行。 */
     entryFocuser: FocusRequester? = null,
+    /** 列表最前面的一块内容（歌手页用它把歌手头 + 专辑区放进同一列里，整页顺着往下滚，
+     *  不用收起/展开那套状态切换）。不传就没有这一项。 */
+    header: (@Composable () -> Unit)? = null,
+    /** 列表最后面的一块内容（歌手页用它放“正在加载更多…/已显示全部 N 首”那行脚标）。不传就没有这一项。 */
+    footer: (@Composable () -> Unit)? = null,
     onPlay: (index: Int) -> Unit,
 ) {
+    // header 占掉布局里的 0 号位：下面步进里凡是拿 layoutInfo 的下标（可见行判断、
+    // scrollToItem）都要加这个偏移；歌曲行自己的下标（focusedIndex、focuserFor）
+    // 还是按 tracks 记，不动。不传 header 时偏移是 0，其它调用方行为一点不变。
+    val headerOffset = if (header != null) 1 else 0
     // Collect once here (shared StateFlows) and derive the set of tracks that are downloaded AND
     // whose file is actually present, so rows don't each subscribe. Reactive: a finished download,
     // a removed download, or a play-time "文件缺失" discovery all update it. Used to hide the row's
@@ -283,7 +292,7 @@ fun TrackList(
             .filter { it !in missing }
             .toSet()
     }
-    val listState = listState ?: rememberLazyListState()
+    val effectiveListState = listState ?: rememberLazyListState()
     // One FocusRequester per row, stable across recompositions: explicit Up/Down handling
     // below moves focus through these, so navigation never depends on Compose's spatial
     // focus search alone — that search is what left focus wandering to the TopNav instead
@@ -321,8 +330,9 @@ fun TrackList(
         if (focusedIndex < 0) {
             if (!trapFocus) return false
             if (tracks.isEmpty()) return true
-            val first = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: 0
-            runCatching { focuserFor(first.coerceIn(tracks.indices)).requestFocus() }
+            // layoutInfo 的下标是布局下标（header 占 0 号位），focuserFor 要的是歌曲下标，减掉偏移。
+            val first = effectiveListState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: headerOffset
+            runCatching { focuserFor((first - headerOffset).coerceIn(tracks.indices)).requestFocus() }
             return true
         }
         val target = focusedIndex + delta
@@ -331,20 +341,21 @@ fun TrackList(
             if (delta < 0) onExitUp?.invoke()
             return true
         }
-        val visible = listState.layoutInfo.visibleItemsInfo.any { it.index == target }
+        // 布局下标 = 歌曲下标 + header 偏移。
+        val visible = effectiveListState.layoutInfo.visibleItemsInfo.any { it.index == target + headerOffset }
         if (visible) {
             runCatching { focuserFor(target).requestFocus() }
         } else {
             stepTarget = target
             scope.launch {
-                runCatching { listState.scrollToItem(target) }
+                runCatching { effectiveListState.scrollToItem(target + headerOffset) }
                 repeat(12) {
                     if (focusedIndex == target || stepTarget != target) return@launch
-                    val nowVisible = listState.layoutInfo.visibleItemsInfo.any { it.index == target }
+                    val nowVisible = effectiveListState.layoutInfo.visibleItemsInfo.any { it.index == target + headerOffset }
                     if (nowVisible) {
                         runCatching { focuserFor(target).requestFocus() }
                     } else {
-                        runCatching { listState.scrollToItem(target) }
+                        runCatching { effectiveListState.scrollToItem(target + headerOffset) }
                     }
                     delay(70)
                 }
@@ -355,13 +366,13 @@ fun TrackList(
     }
     val atTop by remember {
         derivedStateOf {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+            effectiveListState.firstVisibleItemIndex == 0 && effectiveListState.firstVisibleItemScrollOffset == 0
         }
     }
 
     BackHandler(enabled = !atTop) {
         scope.launch {
-            runCatching { listState.animateScrollToItem(0) }
+            runCatching { effectiveListState.animateScrollToItem(0) }
             // Wait a frame so item 0 is composed/visible before requesting focus.
             delay(80)
             runCatching { focuserFor(0).requestFocus() }
@@ -387,7 +398,7 @@ fun TrackList(
         com.walkman.tv.ui.appContainer.events.playerClosed.collect {
             if (lastClickedIndex in tracks.indices) {
                 // Scroll it into view, wait for compose, then request focus.
-                runCatching { listState.animateScrollToItem(lastClickedIndex) }
+                runCatching { effectiveListState.animateScrollToItem(lastClickedIndex) }
                 repeat(5) {
                     delay(60)
                     runCatching { focuserFor(lastClickedIndex).requestFocus() }
@@ -405,7 +416,7 @@ fun TrackList(
     val rowKeys = remember(tracks) { uniqueKeys(tracks.map { it.id }) }
 
     LazyColumn(
-        state = listState,
+        state = effectiveListState,
         // focusRestorer() remembers which row was last focused; when the player overlay closes
         // and focus drops back into the list, it lands on that same row (instead of resetting).
         // Explicit Up/Down: step focus through the rows' own FocusRequesters instead of
@@ -425,6 +436,9 @@ fun TrackList(
         verticalArrangement = Arrangement.spacedBy(6.dp),
         contentPadding = contentPadding,
     ) {
+        // 歌手页一页用：歌手头 + 专辑区在最前面、脚标在最后面，都跟歌曲行在同一列里滚。
+        // header 占布局 0 号位（步进里加 headerOffset 换算，见上面）。
+        if (header != null) item(key = "tracklist_header") { header() }
         itemsIndexed(tracks, key = { i, _ -> rowKeys[i] }) { index, track ->
             // Exactly one FocusRequester per row, so initial-focus / click-restore never
             // collide on the same row. onFocusChanged tracks which row holds focus — the
@@ -457,6 +471,7 @@ fun TrackList(
                 },
             )
         }
+        if (footer != null) item(key = "tracklist_footer") { footer() }
     }
 
     pickerTrack?.let { t ->

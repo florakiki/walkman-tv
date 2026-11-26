@@ -13,6 +13,8 @@ import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.onFocusChanged
@@ -45,6 +47,8 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -122,48 +126,72 @@ private fun NowPlayingPanel(
   // 优化：封面尺寸精准锁定为屏幕高度的 46%（完美的黄金分割占比）
   val coverDynamicSize = screenHeight * 0.46f
 
+  // 面板里当前焦点落在哪个元素上：封面 / 上一首 / 暂停 / 下一首。左右键按它分流——
+  // 旧代码的教训（2026-11-26，Yang 视频）：整个 Column 只拦方向键右，三个圆钮
+  // 也被包进去了，暂停上按右直接跳右边、落不到下一首。圆钮之间左右走是面板自己的事，
+  // 只有从下一首（最右边）和封面按右，才进右边内容区。
+  var panelFocus by remember { mutableStateOf(PanelFocus.COVER) }
+  val prevFocus = remember { FocusRequester() }
+  val playFocus = remember { FocusRequester() }
+  val nextFocus = remember { FocusRequester() }
+
+  // 从封面 / 下一首按右进右边内容区（Yang 定：落最顶上那张卡片；浮层开着进浮层顶上）。
+  // 圆钮在屏幕最底下一排，空间焦点搜索跨不过右边网格那层 focusGroup（要落的卡片在
+  // 上面几行、根本不在圆钮那条横线上），按右就卡在推荐页动不了。这里显式传焦点，不走
+  // 空间搜索。按键吃掉的前提是焦点真的送出去了：先同步试一次，落上就吃掉；同步落不上
+  // 时后台重试到落上为止（网格滚回顶部再试），绝不出现“按键吃掉了、焦点原地不动”；
+  // 只有根本没有目标时才放行走空间搜索。
+  fun goRightToContent(): Boolean {
+    // 1. 浮层开着 → 进浮层里的顶上内容。
+    val entry = appContainer.events.topOverlayEntry
+    if (entry != null) {
+      runCatching { entry.focuser.requestFocus() }
+      if (entry.isFocused()) return true
+      // 顶上内容还没组合好（歌单滚下去了、第 0 行不在屏幕上）：后台重试到落上为止。
+      // 浮层在屏幕上，重试一定能落上；按键吃掉，不再往下漏。
+      scope.launch { entry.retry?.invoke() }
+      return true
+    }
+    // 2. 没浮层 → 同步试最顶上那张卡片，再试上次那张卡片。
+    if (restore.tryFocusSync(restore.topCardKey)) return true
+    if (restore.tryFocusSync(restore.lastFocusedKey)) return true
+    // 3. 同步都落不上：不是没有目标，是目标卡片还没组合好（网格滚下去了、最顶上
+    //    那张在屏幕外）。空间搜索进不了网格那层 focusGroup，放行等于没反应，
+    //    所以还是吃掉按键、后台把网格滚回顶部再重试到落上为止。
+    //    只有根本没有目标（topCardKey 和 lastFocusedKey 都是空）时才放行。
+    val topKey = restore.topCardKey
+    val key = topKey ?: restore.lastFocusedKey ?: return false
+    scope.launch {
+      if (topKey != null) onScrollGridToTop()
+      restore.restoreTo(key)
+      if (topKey != null) restore.restoreTo(restore.lastFocusedKey)
+    }
+    return true
+  }
+
   Column(
-    // 从左边面板按右，一定要能进到右边内容区去：圆钮在屏幕最底下一排，空间焦点搜索
-    // 跨不过右边网格那层 focusGroup（要落的卡片在上面几行、根本不在圆钮那条横线上），
-    // 按右就卡在推荐页动不了。这里显式传焦点，不走空间搜索。
-    // 落点分两种（Yang 定）：浮层开着时进浮层里的顶上内容（歌手页第一张专辑卡片 /
-    // 热门歌曲第 0 行 / 歌单第 0 行 …），不去碰被盖住的首页网格——旧代码只认首页网格
-    // 最顶上那张卡片，焦点落到浮层下面、用户看不见，看着就是“按右没反应”（2026-11-26
-    // 陈奕迅歌手页开着、焦点在暂停键上按右就是这么卡住的；按左没被拦、走空间搜索能回
-    // 圆钮，所以左行右不行）。没浮层时落右边内容最顶上那张卡片（落最顶上，不是落上次那张）。
-    // 按键吃掉的前提是焦点真的送出去了：先同步试一次（卡片在屏幕上时立刻生效、当场验落位），
-    // 落上就吃掉；同步落不上时后台重试到落上为止（网格滚回顶部再试），绝不出现
-    // “按键吃掉了、焦点原地不动”；只有根本没有目标时才放行走空间搜索。
-    // 封面和三个圆钮都在这个 Column 里，按右都走这一条。
     modifier = modifier.padding(start = 0.dp, end = 8.dp)
       .onPreviewKeyEvent { e ->
         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-        if (e.key != Key.DirectionRight) return@onPreviewKeyEvent false
-        // 1. 浮层开着 → 进浮层里的顶上内容。
-        val entry = appContainer.events.topOverlayEntry
-        if (entry != null) {
-          runCatching { entry.focuser.requestFocus() }
-          if (entry.isFocused()) return@onPreviewKeyEvent true
-          // 顶上内容还没组合好（歌单滚下去了、第 0 行不在屏幕上）：后台重试到落上为止。
-          // 浮层在屏幕上，重试一定能落上；按键吃掉，不再往下漏。
-          scope.launch { entry.retry?.invoke() }
-          return@onPreviewKeyEvent true
+        when (e.key) {
+          Key.DirectionRight -> when (panelFocus) {
+            // 圆钮之间左右走：上一首 → 暂停 → 下一首；到下一首再按右才进右边内容区。
+            PanelFocus.PREV -> { runCatching { playFocus.requestFocus() }; true }
+            PanelFocus.PLAY -> { runCatching { nextFocus.requestFocus() }; true }
+            PanelFocus.NEXT, PanelFocus.COVER -> goRightToContent()
+          }
+          Key.DirectionLeft -> when (panelFocus) {
+            PanelFocus.PLAY -> { runCatching { prevFocus.requestFocus() }; true }
+            PanelFocus.NEXT -> { runCatching { playFocus.requestFocus() }; true }
+            // 最左边那个按左：停在原地、按键吃掉，不漏出去。
+            PanelFocus.PREV -> true
+            // 封面按左：不动它，走原来的空间搜索。
+            PanelFocus.COVER -> false
+          }
+          // 上下不动：圆钮按上回封面、封面按下来落圆钮那排，面板里只有封面和三个圆钮
+          // 可聚焦，空间搜索本来就走得通，不拦。
+          else -> false
         }
-        // 2. 没浮层 → 同步试最顶上那张卡片，再试上次那张卡片。
-        if (restore.tryFocusSync(restore.topCardKey)) return@onPreviewKeyEvent true
-        if (restore.tryFocusSync(restore.lastFocusedKey)) return@onPreviewKeyEvent true
-        // 3. 同步都落不上：不是没有目标，是目标卡片还没组合好（网格滚下去了、最顶上
-        //    那张在屏幕外）。空间搜索进不了网格那层 focusGroup，放行等于没反应，
-        //    所以还是吃掉按键、后台把网格滚回顶部再重试到落上为止。
-        //    只有根本没有目标（topCardKey 和 lastFocusedKey 都是空）时才放行。
-        val topKey = restore.topCardKey
-        val key = topKey ?: restore.lastFocusedKey ?: return@onPreviewKeyEvent false
-        scope.launch {
-          if (topKey != null) onScrollGridToTop()
-          restore.restoreTo(key)
-          if (topKey != null) restore.restoreTo(restore.lastFocusedKey)
-        }
-        true
       },
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.Center // 保持纵向绝对居中，留白非常匀称
@@ -171,7 +199,8 @@ private fun NowPlayingPanel(
     // 自适应封面
     TvFocusable(
       onClick = onOpenPlayer,
-      modifier = Modifier.size(coverDynamicSize),
+      modifier = Modifier.size(coverDynamicSize)
+        .onFocusChanged { if (it.isFocused) panelFocus = PanelFocus.COVER },
       shape = RoundedCornerShape(12.dp),
     ) {
       Artwork(track?.picURL, modifier = Modifier.fillMaxSize(), shape = RoundedCornerShape(12.dp))
@@ -216,20 +245,36 @@ private fun NowPlayingPanel(
       )
     }
     Spacer(Modifier.height(14.dp))
-    // 底部控制按钮
+    // 底部控制按钮：上一首 / 暂停 / 下一首。左右键在三个圆钮之间逐个走（面板 Column
+    // 那层按 panelFocus 分流），圆钮自己只记焦点落在哪、不拦按键。
     Row(
       modifier = Modifier.fillMaxWidth(),
       horizontalArrangement = Arrangement.Center,
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      CircleControl(Icons.Filled.SkipPrevious) { controller.prev() }
+      CircleControl(
+        Icons.Filled.SkipPrevious,
+        modifier = Modifier.focusRequester(prevFocus)
+          .onFocusChanged { if (it.isFocused) panelFocus = PanelFocus.PREV },
+      ) { controller.prev() }
       Spacer(Modifier.width(20.dp))
-      CircleControl(if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow) { controller.togglePlay() }
+      CircleControl(
+        if (state.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+        modifier = Modifier.focusRequester(playFocus)
+          .onFocusChanged { if (it.isFocused) panelFocus = PanelFocus.PLAY },
+      ) { controller.togglePlay() }
       Spacer(Modifier.width(20.dp))
-      CircleControl(Icons.Filled.SkipNext) { controller.next() }
+      CircleControl(
+        Icons.Filled.SkipNext,
+        modifier = Modifier.focusRequester(nextFocus)
+          .onFocusChanged { if (it.isFocused) panelFocus = PanelFocus.NEXT },
+      ) { controller.next() }
     }
   }
 }
+
+/** 左边面板里当前焦点落在哪个元素上（左右键按右 / 按左的分流用）。 */
+private enum class PanelFocus { COVER, PREV, PLAY, NEXT }
 
 /** 只读进度条 */
 @Composable
@@ -266,9 +311,14 @@ private fun fmtMillis(ms: Long): String {
 }
 
 @Composable
-private fun CircleControl(icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+private fun CircleControl(
+  icon: androidx.compose.ui.graphics.vector.ImageVector,
+  modifier: Modifier = Modifier,
+  onClick: () -> Unit,
+) {
   TvPill(
     onClick = onClick,
+    modifier = modifier,
     shape = androidx.compose.foundation.shape.CircleShape,
     contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
   ) {

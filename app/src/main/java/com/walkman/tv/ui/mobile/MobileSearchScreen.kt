@@ -61,6 +61,7 @@ import com.walkman.tv.source.catalog.AlbumInfo
 import com.walkman.tv.source.catalog.ArtistDetail
 import com.walkman.tv.source.catalog.ArtistInfo
 import com.walkman.tv.ui.appContainer
+import com.walkman.tv.ui.search.AllAlbumsOverlay
 import com.walkman.tv.ui.components.AlbumGroup
 import com.walkman.tv.ui.components.groupAlbums
 import com.walkman.tv.ui.playList
@@ -443,10 +444,12 @@ fun ArtistDetailView(
     androidx.activity.compose.BackHandler { onBack() }
     var detail by remember { mutableStateOf<ArtistDetail?>(null) }
     var loaded by remember { mutableStateOf(false) }
+    var showAllAlbums by remember { mutableStateOf(false) }
     LaunchedEffect(artist) {
         detail = runCatching { appContainer.artists.fetchArtistDetail(artist) }.getOrNull()
         loaded = true
     }
+    Box(modifier = Modifier.fillMaxSize()) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -489,7 +492,17 @@ fun ArtistDetailView(
                 LazyColumn(Modifier.fillMaxSize()) {
                     if (d.albums.isNotEmpty()) {
                         item {
-                            Text("专辑 (${d.albums.size})", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary, modifier = Modifier.padding(vertical = 6.dp))
+                            // “查看全部专辑”：点进去是全部专辑网格（分页拉），关掉回这里。
+                            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 6.dp)) {
+                                Text("专辑 (${d.artist.albumCount ?: d.albums.size})", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = AppColors.TextPrimary)
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    "查看全部 >",
+                                    fontSize = 13.sp,
+                                    color = AppColors.BrandPrimary,
+                                    modifier = Modifier.clickable { showAllAlbums = true },
+                                )
+                            }
                         }
                         items(d.albums, key = { "${it.source.key}_${it.id}" }) { album ->
                             Row(
@@ -531,6 +544,24 @@ fun ArtistDetailView(
                 }
             }
         }
+    }
+    // “查看全部专辑”浮层：点专辑走手机自己的专辑详情页（onOpenAlbum），关掉回这里。
+    if (showAllAlbums) {
+        val d = detail
+        if (d != null) {
+            AllAlbumsOverlay(
+                artist = artist,
+                initialAlbums = d.albums,
+                initialNextPage = d.albumsNextPage,
+                initialHasMore = d.albumsHasMore,
+                allSongs = d.hotSongs,
+                totalCount = d.artist.albumCount,
+                onBack = { showAllAlbums = false },
+                onOpenPlayer = onOpenPlayer,
+                onOpenAlbum = onOpenAlbum,
+            )
+        }
+    }
     }
 }
 
