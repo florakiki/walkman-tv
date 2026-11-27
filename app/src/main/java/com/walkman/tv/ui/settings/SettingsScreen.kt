@@ -20,6 +20,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.focusable
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Diamond
@@ -674,11 +682,44 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
 private fun DiagnosticsDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     var report by remember { mutableStateOf(CrashDiagnostics.readLastReport(context)) }
+    // 2026-11-27（Yang 报“只显示一部分、下面的看不到”）：日志区之前虽然挂了
+    // verticalScroll，但遥控器上下键走不到它上面——焦点直接落在下面两个按钮上，滚不动，
+    // 下面的记录看不到。改成日志区自己可获焦、开弹窗就先落到它上面，上下键按一下滚一段；
+    // 滚到底 / 顶时放行，焦点才能走到清除记录 / 关闭按钮上。只修展示，不动写入逻辑。
+    val scrollState = rememberScrollState()
+    val scrollFocus = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    LaunchedEffect(Unit) { runCatching { scrollFocus.requestFocus() } }
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("诊断记录", color = AppColors.TextPrimary) },
         text = {
-            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(scrollState)
+                    .focusRequester(scrollFocus)
+                    .focusable()
+                    .onPreviewKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        val stepPx = with(density) { 200.dp.toPx() }
+                        when (e.key) {
+                            Key.DirectionDown -> {
+                                // 到底了就放行，焦点走到下面的按钮上。
+                                if (!scrollState.canScrollForward) return@onPreviewKeyEvent false
+                                scope.launch { scrollState.scrollTo(scrollState.value + stepPx.toInt()) }
+                                true
+                            }
+                            Key.DirectionUp -> {
+                                // 到顶了就放行。
+                                if (!scrollState.canScrollBackward) return@onPreviewKeyEvent false
+                                scope.launch { scrollState.scrollTo((scrollState.value - stepPx).toInt().coerceAtLeast(0)) }
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+            ) {
                 val current = report
                 if (current == null) {
                     Text(

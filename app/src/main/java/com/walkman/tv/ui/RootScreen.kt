@@ -125,12 +125,12 @@ fun RootScreen(modifier: Modifier = Modifier) {
 
     // Subscribe only to the bits the TopNav cares about — without distinctUntilChanged the 1Hz
     // position ticker would recompose the whole root and TopNav once per second.
-    data class NavPlaybackBits(val title: String?, val picURL: String?, val isPlaying: Boolean)
+    data class NavPlaybackBits(val title: String?, val isPlaying: Boolean)
     val navBits by remember {
         appContainer.playbackController.state
-            .map { NavPlaybackBits(it.currentTrack?.name, it.currentTrack?.picURL, it.isPlaying) }
+            .map { NavPlaybackBits(it.currentTrack?.name, it.isPlaying) }
             .distinctUntilChanged()
-    }.collectAsState(initial = NavPlaybackBits(null, null, false))
+    }.collectAsState(initial = NavPlaybackBits(null, false))
 
     LaunchedEffect(Unit) { runCatching { recommendFocus.requestFocus() } }
 
@@ -200,7 +200,6 @@ fun RootScreen(modifier: Modifier = Modifier) {
                     },
                     recommendFocusRequester = recommendFocus,
                     nowPlayingTitle = navBits.title,
-                    nowPlayingPicURL = navBits.picURL,
                     nowPlayingIsPlaying = navBits.isPlaying,
                     onOpenPlayer = { showPlayer = true },
                 )

@@ -234,6 +234,11 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
                 }
             }
             Spacer(Modifier.padding(top = 12.dp))
+            // 2026-11-27（Yang 定）：分类 tab（全部 / 单曲 / 专辑 / 歌单 / 歌手）挪到输入
+            // 关键词的正下方——输完词手指不用跑到右边去，在左边一排就能点筛选，好操作。
+            // tabRowFocus 还是挂第一个 tab 上：结果列表第 0 行按上回来仍落它上面。
+            SearchTabRow(tab, onSelect = { tab = it }, firstTabFocus = tabRowFocus)
+            Spacer(Modifier.padding(top = 12.dp))
             com.walkman.tv.ui.components.TvKeypad(
                 onAppend = { ch -> query += ch },
                 onBackspace = { if (query.isNotEmpty()) query = query.dropLast(1) },
@@ -243,10 +248,8 @@ fun SearchScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
             )
         }
 
-        // RIGHT: category tabs + results
+        // RIGHT: results (tabs moved under the input on the left)
         Column(modifier = Modifier.weight(1f).fillMaxHeight()) {
-            SearchTabRow(tab, onSelect = { tab = it }, firstTabFocus = tabRowFocus)
-            Spacer(Modifier.padding(top = 8.dp))
             ResultsPane(
                 loading = loading,
                 searched = searched,
@@ -612,12 +615,14 @@ enum class SearchTab(val label: String) {
 
 @Composable
 private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit, firstTabFocus: FocusRequester? = null) {
+    // 5 个 tab 一共约 300.dp，左边 360.dp 那列放得下（聚焦放大 1.08 倍也不超）；
+    // padding 从 16.dp 收到 12.dp，留够放大的余量。
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         SearchTab.entries.forEachIndexed { index, t ->
             TvPill(
                 onClick = { onSelect(t) },
                 selected = tab == t,
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 7.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp),
                 modifier = if (index == 0 && firstTabFocus != null) Modifier.focusRequester(firstTabFocus) else Modifier,
             ) {
                 Text(t.label, fontSize = 14.sp, fontWeight = if (tab == t) FontWeight.Bold else FontWeight.Medium)

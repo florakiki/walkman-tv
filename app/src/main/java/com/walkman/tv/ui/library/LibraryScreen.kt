@@ -289,7 +289,7 @@ private fun ListActionHint() {
     )
 }
 
-/** 4-column responsive grid of playlist covers + a "+ 新建歌单" tile at the end. */
+/** 5-column responsive grid of playlist covers + a "+ 新建歌单" tile at the end (2026-11-27：和首页统一成 5 列，卡片按格子宽自适应，排整齐）。 */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun PlaylistGrid(
@@ -299,7 +299,7 @@ private fun PlaylistGrid(
     upFocus: FocusRequester,
 ) {
     LazyVerticalGrid(
-        columns = GridCells.Fixed(4),
+        columns = GridCells.Fixed(5),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
         contentPadding = PaddingValues(vertical = 8.dp, horizontal = 4.dp),

@@ -97,12 +97,14 @@ fun SonglistScreen(onOpenPlayer: () -> Unit, modifier: Modifier = Modifier) {
             when {
                 loading -> LoadingState(Modifier.fillMaxSize())
                 lists.isNotEmpty() -> LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
+                    // 2026-11-27：和首页统一成 5 列、间距 14.dp，卡片按格子宽自适应（正方形），
+                    // 一排 5 张排整齐，不再有的大有的小、有的被截。
+                    columns = GridCells.Fixed(5),
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     // 详情关掉回哪张卡片由上面 detailEntryKey + restore.restoreTo 管，不用
                     // focusRestorer（节点脱离时抛 IllegalStateException，2026-11-26 闪退根因）。
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     items(uniqueLists, key = { it.id }) { sl ->
                         val cardKey = "${sl.source.key}_${sl.id}"
