@@ -174,6 +174,34 @@ object CrashDiagnostics {
         appendFailureEntry(context, entry)
     }
 
+    /**
+     * 记一次启动（第十六轮）：写进程名和分流结果。下次启动就闪退时，诊断里能
+     * 看到是主进程还是 :playback 进程、App.onCreate 有没有把主进程误判成播放进程。
+     */
+    fun recordStartup(context: Context, processName: String, isPlaybackProcess: Boolean) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[启动] $time")
+            appendLine("进程：$processName")
+            appendLine("分流：${if (isPlaybackProcess) ":playback（只跑播放器）" else "主进程（完整初始化）"}")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
+     * 记播放进程启动（第十六轮）：PlaybackService.onCreate 里写，建播放器成功写用
+     * 的是哪条解码路（FFmpeg 优先 / 平台解码），失败写异常。启动就闪退时靠这条
+     * 判断是不是播放器建不起来。
+     */
+    fun recordPlaybackServiceStart(context: Context, detail: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[播放进程启动] $time")
+            appendLine("详情：$detail")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
     /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
     private fun appendFailureEntry(context: Context, entry: String) {
         runCatching {

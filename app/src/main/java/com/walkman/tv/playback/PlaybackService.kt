@@ -22,6 +22,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.walkman.tv.di.CrashDiagnostics
 
 /**
  * 播放进程的 Service（2026-11-27 第十五轮）：ExoPlayer 只活在这个 `:playback`
@@ -82,11 +83,46 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
         gainProcessor = GainAudioProcessor().apply { enabled = gainEnabled }
         levelProcessor = AudioLevelProcessor { level -> sendLevel(level) }
-        val exoPlayer = buildPlayer(this)
+        // 建播放器（第十六轮：这里绝不能抛错杀掉 Service——启动闪退的头号嫌疑就是
+        // 这里。先试 FFmpeg 优先；建不起来（比如这台电视加载 FFmpeg native 库失败）
+        // 就退回平台解码再建一次；再建不起来也不死 Service，只记诊断、留 mediaSession
+        // 为空，主进程那边连不上会后台重试，App 照样进首页）。
+        val exoPlayer = runCatching {
+            buildPlayer(this, preferFfmpeg = true).also {
+                CrashDiagnostics.recordPlaybackServiceStart(this, "播放器建成：FFmpeg 软解优先")
+            }
+        }.getOrElse { firstError ->
+            android.util.Log.w(TAG, "FFmpeg-first player build failed, retrying platform-only", firstError)
+            runCatching {
+                buildPlayer(this, preferFfmpeg = false).also {
+                    CrashDiagnostics.recordPlaybackServiceStart(
+                        this,
+                        "播放器建成：平台解码（FFmpeg 优先失败：${firstError.javaClass.simpleName}: ${firstError.message}）",
+                    )
+                }
+            }.getOrElse { secondError ->
+                android.util.Log.e(TAG, "player build failed entirely", secondError)
+                CrashDiagnostics.recordPlaybackServiceStart(
+                    this,
+                    "播放器建不起来：FFmpeg 优先失败 ${firstError.javaClass.simpleName}: ${firstError.message}；" +
+                        "平台解码失败 ${secondError.javaClass.simpleName}: ${secondError.message}",
+                )
+                null
+            }
+        } ?: return
         player = exoPlayer
-        mediaSession = MediaSession.Builder(this, exoPlayer)
-            .setCallback(SessionCallback())
-            .build()
+        mediaSession = runCatching {
+            MediaSession.Builder(this, exoPlayer)
+                .setCallback(SessionCallback())
+                .build()
+        }.getOrElse { e ->
+            android.util.Log.e(TAG, "MediaSession build failed", e)
+            CrashDiagnostics.recordPlaybackServiceStart(
+                this,
+                "播放器建成但 MediaSession 建不起来：${e.javaClass.simpleName}: ${e.message}",
+            )
+            null
+        }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
@@ -164,7 +200,7 @@ class PlaybackService : MediaSessionService() {
      *   解码器再试。只能救初始化失败，播起来才崩的 SIGSEGV 救不了——那靠
      *   :playback 隔离。
      */
-    private fun buildPlayer(appContext: Context): ExoPlayer {
+    private fun buildPlayer(appContext: Context, preferFfmpeg: Boolean): ExoPlayer {
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
                 /* minBufferMs = */ 30_000,
@@ -202,8 +238,13 @@ class PlaybackService : MediaSessionService() {
                     )
                     .build()
             }
+        }.apply {
+            // FFmpeg 优先：扩展渲染器排在平台 MediaCodec 前面；关掉就是纯平台解码
+            // （第十六轮的退路：FFmpeg native 库在某台电视上加载失败时用）。
+            if (preferFfmpeg) {
+                setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            }
         }
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setMediaCodecSelector { mimeType, secure, tunneling ->
                 val all = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
                 // 只管音频；MV 视频仍走硬解，软解 1080p 在盒子上会卡。没有可用的软件解码器时退回

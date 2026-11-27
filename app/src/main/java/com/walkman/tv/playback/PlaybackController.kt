@@ -179,6 +179,14 @@ class PlaybackController(
      *  死两次就跳下一首并写进拉黑文件（PlaybackCrashGuard）。 */
     private val playbackDeathsByTrack = mutableMapOf<String, Int>()
 
+    /** :playback 连续死亡的次数和最近一次死亡时间（重连退避用：短时间内死太多次
+     *  就慢点重连，别锤死循环。连上后清掉，见 onControllerConnected。） */
+    private var consecutiveDeaths = 0
+    private var lastDeathMs = 0L
+
+    /** release() 后为 true：后台重连循环停掉，不再发起新连接。 */
+    private var released = false
+
     /** 增益开关（设置 → 增益）：值存在这儿，发给 :playback（见 [sendPlaybackCommand]）；
      *  播放器在 :playback 进程里，GainAudioProcessor 也在那儿。默认开，跟设置默认值一致。 */
     @Volatile var builtinGainEnabled: Boolean = true
@@ -360,9 +368,9 @@ class PlaybackController(
     }
 
     init {
-        // 连上 :playback 里的远程播放器（MediaController）。连接是异步的：刚启动要
-        // 等一会儿；播放进程死了重建也要等一会儿。播歌前 awaitPlayer 会等它。
-        connectController()
+        // 播放器连接改成后台懒加载（第十六轮）：启动时不再同步去连 :playback——
+        // Service 连不上 App 也要能进首页。后台循环带退避重试；播歌前 awaitPlayer 会等它。
+        startConnectLoop()
         startPositionTicker()
     }
 
@@ -943,6 +951,7 @@ class PlaybackController(
     }
 
     fun release() {
+        released = true
         resolveJob?.cancel()
         controllerFuture?.cancel(true)
         controllerFuture = null
@@ -965,10 +974,59 @@ class PlaybackController(
         }
     }
 
+    /** 后台连 :playback（第十六轮）：启动时不再同步连，Service 连不上 App 也要能
+     *  进首页。循环带退避重试；只在“没连上且没有正在进行的连接”时才发起一次，
+     *  避免取消掉正在连的 future。release() 后停掉。 */
+    private fun startConnectLoop() {
+        scope.launch {
+            var backoffMs = 500L
+            while (!released) {
+                if (_remotePlayer.value == null) {
+                    val pending = controllerFuture?.let { !it.isDone } ?: false
+                    if (!pending) {
+                        runCatching { connectController() }
+                        delay(backoffMs)
+                        backoffMs = (backoffMs * 2).coerceAtMost(10_000L)
+                        continue
+                    }
+                } else {
+                    backoffMs = 500L
+                }
+                delay(1_000L)
+            }
+        }
+    }
+
+    /** 播歌前确保正在连（没连上且没有正在进行的连接时发起一次）。 */
+    private fun ensureConnected() {
+        if (released || _remotePlayer.value != null) return
+        val pending = controllerFuture?.let { !it.isDone } ?: false
+        if (!pending) runCatching { connectController() }
+    }
+
+    /** 播放进程死后重连（带退避）：短时间内连续死多次时，先等几秒再连，别锤死循环。 */
+    private fun reconnectWithBackoff() {
+        if (released) return
+        if (consecutiveDeaths >= 3) {
+            val waitMs = 5_000L
+            android.util.Log.w(
+                "PlaybackController",
+                "playback died $consecutiveDeaths times in a row; delaying reconnect ${waitMs}ms",
+            )
+            scope.launch {
+                delay(waitMs)
+                if (!released && _remotePlayer.value == null) runCatching { connectController() }
+            }
+        } else {
+            runCatching { connectController() }
+        }
+    }
+
     /** 连上 :playback 里的 MediaSession（MediaController.buildAsync）。连接是异步的：
      *  刚启动要等一会儿；播放进程死后重建也要等一会儿。播歌前 awaitPlayer 会等它。
      *  重复调用会取消旧的连接（连续死了两次时，旧 future 的回调会放掉旧控制器）。 */
     private fun connectController() {
+        if (released) return
         controllerFuture?.cancel(true)
         controllerFuture = null
         val token = SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java))
@@ -991,6 +1049,7 @@ class PlaybackController(
     private fun onControllerConnected(controller: MediaController) {
         _remotePlayer.value = controller
         mediaController = controller
+        consecutiveDeaths = 0
         controller.addListener(playerListener)
         // 把当前设置发给 :playback（刚建好的播放器用的是默认值）。
         sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, builtinGainEnabled)
@@ -1027,6 +1086,7 @@ class PlaybackController(
     /** 等远程播放器连上（刚启动 / 播放进程死后重建要一点时间）。超时返回 null。 */
     private suspend fun awaitPlayer(timeoutMs: Long = AWAIT_PLAYER_TIMEOUT_MS): Player? {
         _remotePlayer.value?.let { return it }
+        ensureConnected()
         return withTimeoutOrNull(timeoutMs) {
             _remotePlayer.first { it != null }
         }
@@ -1076,12 +1136,17 @@ class PlaybackController(
         CrashDiagnostics.recordPlaybackProcessDeath(appContext, song, url, origin, reasonText)
         android.util.Log.w("PlaybackController", "playback process died: $song ($reasonText)")
 
+        // 连续死亡计数（重连退避用）：10 秒内又死一次就 +1，否则重新算。
+        val nowMs = System.currentTimeMillis()
+        consecutiveDeaths = if (nowMs - lastDeathMs < 10_000L) consecutiveDeaths + 1 else 1
+        lastDeathMs = nowMs
+
         // 正在播的那首歌的“尝试记录”清掉（恢复逻辑会重新写）。
         PlaybackCrashGuard.clearAttempt(appContext)
 
         // 没在播 / 正在解析新歌：只重建连接，不恢复。
         if (track == null || !wasPlaying || _state.value.resolving) {
-            connectController()
+            reconnectWithBackoff()
             return
         }
 
@@ -1089,7 +1154,7 @@ class PlaybackController(
             // 内存杀死：同一首歌没问题，从头再播一遍。
             val index = _state.value.index
             pendingRecovery = { playAt(index) }
-            connectController()
+            reconnectWithBackoff()
             return
         }
 
@@ -1103,7 +1168,7 @@ class PlaybackController(
         } else {
             pendingRecovery = { tryCrossSourceOrAdvance(track, "播放进程崩溃") }
         }
-        connectController()
+        reconnectWithBackoff()
     }
 
     /** 读 :playback 进程最近一次的退出原因（API 30+）。返回 null 表示读不到（低版本 /
