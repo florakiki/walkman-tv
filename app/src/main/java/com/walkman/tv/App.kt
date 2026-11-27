@@ -20,9 +20,14 @@ class App : Application() {
         // Application.onCreate 每个进程都会跑，不分流的话 :playback 会白白建一套容器、
         // 起一遍 bootstrap，还多占一份内存。播放器由 PlaybackService 自己建。
         if (playback) return
-        // Load the QuickJS native lib once for the whole process (custom-source engine).
-        QuickJSLoader.init()
         container = AppContainer(this)
+        // 第二十四轮：QuickJS native 库加载挪后台线程，别占主线程的首帧时间。
+        // 脚本加载在 bootstrap 里等 quickJsReady 完成才跑，不会撞上未加载的库；
+        // 加载失败也照常 complete（脚本加载自己有 runCatching 兜底），不卡住启动。
+        Thread({
+            runCatching { QuickJSLoader.init() }
+            container.quickJsReady.complete(Unit)
+        }, "quickjs-init").start()
         // ExoPlayer must be created on the main thread.
         container.initPlayback()
         container.bootstrap()

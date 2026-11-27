@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import com.walkman.tv.ui.RootScreen
 import com.walkman.tv.ui.mobile.MobileRootScreen
@@ -39,6 +40,13 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(playing) {
                 if (playing) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            // 第二十四轮：等首帧画完再连 :playback 播放进程——冷启动时两个进程同时抢
+            // 电视弱 CPU 会拖慢首帧。播歌前 ensureConnected() 也会主动发起连接，
+            // 所以晚几百毫秒连不影响播放。
+            LaunchedEffect(Unit) {
+                withFrameNanos { }
+                App.container.playbackController.startConnection()
             }
             if (isMobile) {
                 MobileTheme {

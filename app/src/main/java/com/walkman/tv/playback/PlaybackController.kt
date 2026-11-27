@@ -391,8 +391,21 @@ class PlaybackController(
     init {
         // 播放器连接改成后台懒加载（第十六轮）：启动时不再同步去连 :playback——
         // Service 连不上 App 也要能进首页。后台循环带退避重试；播歌前 awaitPlayer 会等它。
-        startConnectLoop()
+        // 第二十四轮：连接循环不再在构造时立刻启动，改由 MainActivity 首帧画完后调
+        // startConnection() 启动——冷启动时主进程和 :playback 进程同时抢电视弱 CPU
+        // 会拖慢首帧。播歌前 ensureConnected() 也会主动发起连接，所以晚启动不影响播放。
         startPositionTicker()
+    }
+
+    /** 连接循环是否已启动（第二十四轮：等首帧画完再启动，见 startConnection）。 */
+    @Volatile
+    private var connectLoopStarted = false
+
+    /** 首帧画完后调用：启动 :playback 连接循环。重复调用无操作。 */
+    fun startConnection() {
+        if (connectLoopStarted) return
+        connectLoopStarted = true
+        startConnectLoop()
     }
 
     // MARK: - queue control

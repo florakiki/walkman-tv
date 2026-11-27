@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.focus.onFocusChanged
@@ -194,21 +193,6 @@ private fun RecommendGrid(
     }
   }
 
-  fun openBoard(board: com.walkman.tv.data.model.BoardInfo) {
-    if (loadingDetail) return
-    scope.launch {
-      loadingDetail = true
-      val svc = appContainer.boards.serviceFor(board.source)
-      val tracks = runCatching { svc?.fetchTracks(board.bangid, 1) ?: emptyList() }.getOrDefault(emptyList())
-      detail = DetailView(
-        title = board.name,
-        subtitle = null,
-        tracks = tracks,
-      )
-      loadingDetail = false
-    }
-  }
-
   // 首屏纵向预算（第二十三轮）：网格视口高 = 屏高 − 顶栏，两排海报（含歌名/歌手名）
   // 必须在一屏内完整露出来。海报边长按视口高自适应算，再被 5 列的列宽封顶；
   // 窄屏（720p 电视）上海报会比原来小，这是两排都露出来的代价。
@@ -232,7 +216,8 @@ private fun RecommendGrid(
         settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
         home.isLoading && home.heroes.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
         else -> {
-          // 推荐页顺序（Yang 定，2026-11-27 改）：歌手 → 已播/收藏 → 每日30首 → 猜你喜欢 → 排行榜 → 推荐歌单。
+          // 推荐页顺序（Yang 定，2026-11-27 改；排行榜专区 2026-11-27 撤掉，顶栏已有排行榜 tab）：
+          // 歌手 → 已播/收藏 → 每日30首 → 猜你喜欢 → 推荐歌单。
           val songlists = home.heroes.map { it.songlist } + home.recommendations
           // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
           if (hotSingers.isNotEmpty()) {
@@ -302,27 +287,6 @@ private fun RecommendGrid(
                 restore = restore,
                 onPlay = { index -> playList(guessTracks, index); onOpenPlayer() },
                 cardWidth = posterW,
-              )
-            }
-          }
-          if (home.boards.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
-              SectionHeader("排行榜", null, trailing = "查看全部") {
-                onNavigate(NavSection.Leaderboard)
-              }
-            }
-            gridItems(
-              home.boards.distinctBy { "${it.source.key}_${it.id}" },
-              key = { "${it.source.key}_${it.id}" },
-            ) { board ->
-              val boardKey = "board_${board.source.key}_${board.id}"
-              GridAlbumCard(
-                picURL = board.picURL,
-                title = board.name,
-                subtitle = null,
-                fallbackTint = board.source.tintColor(),
-                modifier = restore.modifierFor(boardKey),
-                onClick = { detailEntryKey = boardKey; openBoard(board) },
               )
             }
           }

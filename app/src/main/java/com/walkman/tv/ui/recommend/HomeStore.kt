@@ -31,14 +31,13 @@ data class HomeState(
     val isLoading: Boolean = false,
     val heroes: List<HeroItem> = emptyList(),
     val recommendations: List<SonglistInfo> = emptyList(),
-    val boards: List<BoardInfo> = emptyList(),
     val sources: List<SourceID> = emptyList(),
     /** 每日30首：QQ 巅峰榜日榜（流行指数榜）前 30 首为主，不够时其他平台日榜补齐。每天变，不进磁盘缓存。 */
     val daily30: List<Track> = emptyList(),
 )
 
 /**
- * 磁盘缓存的 DTO：SonglistInfo / BoardInfo 是普通 data class（没加 @Serializable），
+ * 磁盘缓存的 DTO：SonglistInfo 是普通 data class（没加 @Serializable），
  * 不动共享模型，缓存层自己转一道。source 只存 key，读回时对不上已知平台的丢掉。
  */
 @Serializable
@@ -53,15 +52,6 @@ private data class SonglistDto(
 )
 
 @Serializable
-private data class BoardDto(
-    val id: String,
-    val source: String,
-    val bangid: String,
-    val name: String,
-    val picURL: String? = null,
-)
-
-@Serializable
 private data class HeroDto(val songlist: SonglistDto, val source: String)
 
 @Serializable
@@ -69,7 +59,6 @@ private data class HomeCache(
     val sources: List<String> = emptyList(),
     val heroes: List<HeroDto> = emptyList(),
     val recommendations: List<SonglistDto> = emptyList(),
-    val boards: List<BoardDto> = emptyList(),
 )
 
 private fun SonglistInfo.toDto() = SonglistDto(id, source.key, name, author, picURL, trackCount, playCount)
@@ -77,13 +66,6 @@ private fun SonglistInfo.toDto() = SonglistDto(id, source.key, name, author, pic
 private fun SonglistDto.toSonglistInfo(): SonglistInfo? {
     val src = SourceID.fromKey(source) ?: return null
     return SonglistInfo(id, src, name, author, picURL, trackCount, playCount)
-}
-
-private fun BoardInfo.toDto() = BoardDto(id, source.key, bangid, name, picURL)
-
-private fun BoardDto.toBoardInfo(): BoardInfo? {
-    val src = SourceID.fromKey(source) ?: return null
-    return BoardInfo(id, src, bangid, name, picURL)
 }
 
 private fun HomeCache.toState(): HomeState = HomeState(
@@ -94,7 +76,6 @@ private fun HomeCache.toState(): HomeState = HomeState(
         HeroItem(info, src)
     },
     recommendations = recommendations.mapNotNull { it.toSonglistInfo() },
-    boards = boards.mapNotNull { it.toBoardInfo() },
     sources = sources.mapNotNull { SourceID.fromKey(it) },
 )
 
@@ -104,7 +85,8 @@ private fun HomeCache.toState(): HomeState = HomeState(
  *   1. Parallel fetch each enabled source's top recommended songlists (1st order, ALL tag, page 1).
  *   2. Hero pool = first songlist of each source.
  *   3. Recommendations row = drop-first interleave across sources, take 12.
- *   4. Boards row = quota-balanced across sources, target total 12.
+ *   4. Boards row 已撤（第二十四轮，Yang 2026-11-27 定：首页排行榜专区删掉，
+ *      顶栏已有排行榜 tab；排行榜改由各排行榜入口点开时现拉，见 fetchBoards）。
  *
  * Re-runs only when the set of enabled sources actually changed (sorted-joined keys), so flipping
  * an unrelated setting doesn't refetch.
@@ -148,7 +130,7 @@ class HomeStore(
             _state.update {
                 it.copy(
                     isLoading = false, heroes = emptyList(), recommendations = emptyList(),
-                    boards = emptyList(), sources = emptyList(), daily30 = emptyList(),
+                    sources = emptyList(), daily30 = emptyList(),
                 )
             }
             return
@@ -156,90 +138,103 @@ class HomeStore(
         loadJob = scope.launch {
             _state.update { it.copy(isLoading = true, sources = srcs) }
 
-            // 推荐歌单切 QQ（2026-11-26 Yang 定）：勾了 QQ 时只走 QQSonglist（最热，ALL tag，
-            // 第 1 页 36 张，取 13 张：1 张 hero + 12 张推荐）；QQ 拉空了（接口挂了）或没勾 QQ
-            // 时才回落到原来的四平台混拼，不给半空的首页。
-            val qqSonglists: List<SonglistInfo> = if (SourceID.TX in srcs) {
-                val svc = songlists.serviceFor(SourceID.TX)
-                val order = svc?.orders?.firstOrNull()
-                if (svc == null || order == null) emptyList()
-                else runCatching { svc.fetchRecommended(order, SonglistTag.ALL, 1) }
-                    .getOrDefault(emptyList())
-            } else emptyList()
-            val heroes: List<HeroItem>
-            val recommendations: List<SonglistInfo>
-            if (qqSonglists.isNotEmpty()) {
-                heroes = listOf(HeroItem(qqSonglists.first(), SourceID.TX))
-                recommendations = qqSonglists.drop(1).take(12)
-            } else {
-                // Section 3 step 1: parallel songlist fetch per source.
-                val groups: Map<SourceID, List<SonglistInfo>> = coroutineScope {
-                    srcs.map { s ->
-                        async {
-                            val svc = songlists.serviceFor(s)
-                            if (svc == null) return@async s to emptyList()
-                            val order = svc.orders.firstOrNull() ?: return@async s to emptyList()
-                            val list = runCatching { svc.fetchRecommended(order, SonglistTag.ALL, 1) }
-                                .getOrDefault(emptyList())
-                            s to list
-                        }
-                    }.awaitAll().toMap()
-                }
-
-                // Step 2: hero pool — 1 per enabled source (the first of its recommendations).
-                heroes = srcs.mapNotNull { s -> groups[s]?.firstOrNull()?.let { HeroItem(it, s) } }
-
-                // Step 3: recommendation tail interleave — never two in a row from the same source.
-                val tails = srcs.associateWith { groups[it].orEmpty().drop(1).take(8) }
-                val recs = mutableListOf<SonglistInfo>()
-                val maxSize = tails.values.maxOfOrNull { it.size } ?: 0
-                for (i in 0 until maxSize) {
-                    for (s in srcs) tails[s]?.getOrNull(i)?.let { recs += it }
-                }
-                recommendations = recs.take(12)
-            }
-
-            // 排行榜切 QQ（同上）：勾了 QQ 时只走 QQBoard 的 15 张榜，取前 12；
-            // QQ 拉空 / 没勾时回落到原来的 quota-balanced 四平台混拼。
-            val boardList: List<BoardInfo> = run {
-                val qqBoards: List<BoardInfo> = if (SourceID.TX in srcs) {
-                    runCatching { boards.serviceFor(SourceID.TX)?.fetchBoards() }
-                        .getOrNull().orEmpty()
-                } else emptyList()
-                if (qqBoards.isNotEmpty()) {
-                    qqBoards.take(12)
-                } else {
-                    // Step 4: boards — parallel fetch, then quota-balance across enabled sources.
-                    val boardsBySource: Map<SourceID, List<BoardInfo>> = coroutineScope {
-                        srcs.map { s ->
-                            async {
-                                val svc = boards.serviceFor(s)
-                                if (svc == null) return@async s to emptyList()
-                                s to runCatching { svc.fetchBoards() }.getOrDefault(emptyList())
-                            }
-                        }.awaitAll().toMap()
+            // 第二十四轮：两路并行——推荐歌单和每日30首互相没依赖，以前是串行等
+            // （歌单 → 排行榜 → 写缓存 → 每日30首），QQ 慢时几步叠加奔十秒。
+            // 现在两路同时发，哪个先回就先刷哪块；歌单到了就清加载态、写缓存，
+            // 不等每日30首（酷狗/网易日榜接口奇慢，M 实测 14–30 秒）。
+            // 排行榜那路也撤了（Yang 2026-11-27 定：首页排行榜专区删掉，顶栏
+            // 已有排行榜 tab，点进去的排行榜页自己拉；手机排行榜 tab 点开时
+            // 调 fetchBoards() 现拉）。
+            coroutineScope {
+                val songlistsDeferred = async { fetchSonglistsLeg(srcs) }
+                val dailyDeferred = async { fetchDaily30(srcs) }
+                launch {
+                    val (heroes, recommendations) = songlistsDeferred.await()
+                    _state.update {
+                        it.copy(
+                            isLoading = false,
+                            heroes = heroes,
+                            recommendations = recommendations,
+                            sources = srcs,
+                        )
                     }
-                    balanceBoards(srcs, boardsBySource, totalTarget = 12)
+                    saveCache(heroes, recommendations, srcs)
+                }
+                launch {
+                    val daily = dailyDeferred.await()
+                    _state.update { it.copy(daily30 = daily) }
                 }
             }
-
-            _state.update {
-                it.copy(
-                    isLoading = false,
-                    heroes = heroes,
-                    recommendations = recommendations,
-                    boards = boardList,
-                    sources = srcs,
-                )
-            }
-            saveCache(heroes, recommendations, boardList, srcs)
-
-            // 每日30首单独拉：先把歌单/排行榜刷出来，daily30 到了再单独更新一次 state。
-            // 酷狗/网易的日榜接口奇慢（M 实测 14–30 秒），不等它们拖住上面那次刷新。
-            // daily30 不进 home-cache.json：每天变，缓存会放旧歌；首帧这区先空着，拉到再出。
-            val daily = fetchDaily30(srcs)
-            _state.update { it.copy(daily30 = daily) }
         }
+    }
+
+    /**
+     * 推荐歌单那路：勾了 QQ 时只走 QQSonglist（最热，ALL tag，第 1 页 36 张，
+     * 取 13 张：1 张 hero + 12 张推荐）；QQ 拉空了（接口挂了）或没勾 QQ 时才
+     * 回落到原来的四平台混拼，不给半空的首页。
+     */
+    private suspend fun fetchSonglistsLeg(srcs: List<SourceID>): Pair<List<HeroItem>, List<SonglistInfo>> {
+        val qqSonglists: List<SonglistInfo> = if (SourceID.TX in srcs) {
+            val svc = songlists.serviceFor(SourceID.TX)
+            val order = svc?.orders?.firstOrNull()
+            if (svc == null || order == null) emptyList()
+            else runCatching { svc.fetchRecommended(order, SonglistTag.ALL, 1) }
+                .getOrDefault(emptyList())
+        } else emptyList()
+        if (qqSonglists.isNotEmpty()) {
+            return listOf(HeroItem(qqSonglists.first(), SourceID.TX)) to qqSonglists.drop(1).take(12)
+        }
+        // Section 3 step 1: parallel songlist fetch per source.
+        val groups: Map<SourceID, List<SonglistInfo>> = coroutineScope {
+            srcs.map { s ->
+                async {
+                    val svc = songlists.serviceFor(s)
+                    if (svc == null) return@async s to emptyList()
+                    val order = svc.orders.firstOrNull() ?: return@async s to emptyList()
+                    val list = runCatching { svc.fetchRecommended(order, SonglistTag.ALL, 1) }
+                        .getOrDefault(emptyList())
+                    s to list
+                }
+            }.awaitAll().toMap()
+        }
+
+        // Step 2: hero pool — 1 per enabled source (the first of its recommendations).
+        val heroes = srcs.mapNotNull { s -> groups[s]?.firstOrNull()?.let { HeroItem(it, s) } }
+
+        // Step 3: recommendation tail interleave — never two in a row from the same source.
+        val tails = srcs.associateWith { groups[it].orEmpty().drop(1).take(8) }
+        val recs = mutableListOf<SonglistInfo>()
+        val maxSize = tails.values.maxOfOrNull { it.size } ?: 0
+        for (i in 0 until maxSize) {
+            for (s in srcs) tails[s]?.getOrNull(i)?.let { recs += it }
+        }
+        return heroes to recs.take(12)
+    }
+
+    /**
+     * 排行榜那路：勾了 QQ 时只走 QQBoard 的 15 张榜，取前 12；QQ 拉空 / 没勾时
+     * 回落到原来的 quota-balanced 四平台混拼。不再由 load() 在首页启动时拉——
+     * 手机排行榜 tab 点开时现调这里拉，电视顶栏排行榜 tab 点进的排行榜页自己拉。
+     */
+    suspend fun fetchBoards(srcs: List<SourceID>): List<BoardInfo> {
+        val qqBoards: List<BoardInfo> = if (SourceID.TX in srcs) {
+            runCatching { boards.serviceFor(SourceID.TX)?.fetchBoards() }
+                .getOrNull().orEmpty()
+        } else emptyList()
+        if (qqBoards.isNotEmpty()) {
+            return qqBoards.take(12)
+        }
+        // Step 4: boards — parallel fetch, then quota-balance across enabled sources.
+        val boardsBySource: Map<SourceID, List<BoardInfo>> = coroutineScope {
+            srcs.map { s ->
+                async {
+                    val svc = boards.serviceFor(s)
+                    if (svc == null) return@async s to emptyList()
+                    s to runCatching { svc.fetchBoards() }.getOrDefault(emptyList())
+                }
+            }.awaitAll().toMap()
+        }
+        return balanceBoards(srcs, boardsBySource, totalTarget = 12)
     }
 
     /**
@@ -298,18 +293,16 @@ class HomeStore(
     private suspend fun saveCache(
         heroes: List<HeroItem>,
         recommendations: List<SonglistInfo>,
-        boards: List<BoardInfo>,
         srcs: List<SourceID>,
     ) {
         val store = cacheStore ?: return
-        if (heroes.isEmpty() && recommendations.isEmpty() && boards.isEmpty()) return
+        if (heroes.isEmpty() && recommendations.isEmpty()) return
         withContext(Dispatchers.IO) {
             store.save(
                 HomeCache(
                     sources = srcs.map { it.key },
                     heroes = heroes.map { HeroDto(it.songlist.toDto(), it.source.key) },
                     recommendations = recommendations.map { it.toDto() },
-                    boards = boards.map { it.toDto() },
                 ),
             )
         }

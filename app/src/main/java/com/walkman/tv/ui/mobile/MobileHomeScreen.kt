@@ -301,29 +301,7 @@ fun MobileHomeScreen(
             }
             2 -> {
                 item { SectionHeader("排行榜", actionLabel = null) {} }
-                if (home.boards.isEmpty()) {
-                    item {
-                        Text(
-                            if (home.isLoading) "排行榜加载中…" else "排行榜拉取失败，检查网络后重进试试。",
-                            color = AppColors.TextMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp),
-                        )
-                    }
-                }
-                items(home.boards) { board ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onOpenBoard(board) }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CoverImage(board.picURL, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)))
-                        Spacer(Modifier.width(12.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(board.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
+                item { BoardsTab(onOpenBoard) }
             }
         }
         item { Spacer(Modifier.height(96.dp)) }
@@ -479,6 +457,55 @@ private fun AllSonglistsGrid(columns: Int, onOpen: (SonglistInfo) -> Unit) {
 
 /** 新区完整列表的入参：标题 + 副标题 + 已拉到的曲目（不再联网拉）。 */
 private data class TrackListDetail(val title: String, val subtitle: String?, val tracks: List<Track>)
+
+/**
+ * 排行榜 tab：点进来才拉（第二十四轮：首页启动不再拉排行榜那路）。
+ * 取法和原来 HomeStore 里排行榜那路一样：勾了 QQ 只走 QQ 的榜，QQ 拉空 /
+ * 没勾时各平台混拼取 12 张（见 HomeStore.fetchBoards）。
+ */
+@Composable
+private fun BoardsTab(onOpenBoard: (BoardInfo) -> Unit) {
+    val settings by appContainer.settingsStore.settings.collectAsState()
+    var lists by remember { mutableStateOf<List<BoardInfo>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+    LaunchedEffect(settings.homeSources) {
+        loading = true
+        lists = fetchOr(emptyList()) {
+            appContainer.homeStore.fetchBoards(
+                SourceID.homePageOrder.filter { it in settings.homeSources },
+            )
+        }
+        loading = false
+    }
+    if (loading && lists.isEmpty()) {
+        Text(
+            "排行榜加载中…",
+            color = AppColors.TextMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp),
+        )
+        return
+    }
+    if (lists.isEmpty()) {
+        Text("排行榜拉取失败，检查网络后重进试试。", color = AppColors.TextMuted, fontSize = 13.sp, modifier = Modifier.padding(vertical = 8.dp))
+        return
+    }
+    Column {
+        lists.forEach { board ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onOpenBoard(board) }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CoverImage(board.picURL, Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(board.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = AppColors.TextPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+    }
+}
 
 /**
  * 新区（每日30首 / 猜你喜欢）的横排歌曲卡片行：前 12 首，点卡片直接播整段队列。

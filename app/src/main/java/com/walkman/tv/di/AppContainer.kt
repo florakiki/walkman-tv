@@ -9,6 +9,7 @@ import com.walkman.tv.data.store.SettingsStore
 import com.walkman.tv.playback.EqualizerManager
 import com.walkman.tv.playback.LyricsFetcher
 import com.walkman.tv.playback.PlaybackController
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.walkman.tv.source.OtherSourceFinder
 import com.walkman.tv.source.SourceManager
 import com.walkman.tv.source.builtin.BuiltInLyricResolver
@@ -42,6 +44,9 @@ class AppContainer(val appContext: Context) {
     /** In-app HTTP server backing the phone-to-TV QR flow. null when start failed. */
     @Volatile var localServer: LocalServer? = null
         private set
+
+    /** QuickJS native 库加载完成的信号（第二十四轮：加载挪后台线程，脚本加载前等它）。 */
+    val quickJsReady = CompletableDeferred<Unit>()
 
     val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -314,14 +319,6 @@ class AppContainer(val appContext: Context) {
 
     /** Load persisted data and wire settings → playback. Called once at startup. */
     fun bootstrap() {
-        // Bring up the LAN HTTP server (best-effort; QR features just won't work if it fails).
-        if (localServer == null) {
-            localServer = LocalServer.start(
-                events,
-                hotSearchJson = { hotSearchJsonBlocking() },
-                sync = syncHandler,
-            )
-        }
         // 启动空白修法：先同步读上次的播放快照、只摆队列不续播（wasPlaying=false），
         // 让左边面板第一帧就有歌，不等脚本加载完。脚本就绪后下面原来那次恢复再跑一遍
         // （同队列是幂等的），上次在播时才真正 playAt() 续播。initPlayback() 必须已
@@ -330,6 +327,17 @@ class AppContainer(val appContext: Context) {
             playbackController.restoreSnapshot(playbackSnapshotStore.loadSync().copy(wasPlaying = false))
         }
         appScope.launch {
+            // 第二十四轮：局域网 HTTP 服务（NanoHTTPD 绑端口）挪后台线程起，不占主线程
+            // 的首帧时间。只影响扫码 / 同步功能，首页不依赖它。
+            if (localServer == null) {
+                localServer = withContext(Dispatchers.IO) {
+                    LocalServer.start(
+                        events,
+                        hotSearchJson = { hotSearchJsonBlocking() },
+                        sync = syncHandler,
+                    )
+                }
+            }
             settingsStore.loadAll()
             libraryStore.loadAll()
             syncPeerStore.loadAll()
@@ -348,6 +356,9 @@ class AppContainer(val appContext: Context) {
                 downloadStore.downloadTreeUri = s.customDownloadTreeUri?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() }
                 downloadCoordinator.setMaxConcurrent(s.maxConcurrentDownloads)
             }.launchIn(appScope)
+            // 第二十四轮：QuickJS native 库在 App.onCreate 里挪后台线程加载了，
+            // 这里等它就绪再加载脚本，免得 QuickJSContext.create() 撞上未加载的库。
+            quickJsReady.await()
             scriptStore.loadAll()
             // 第十七轮：记音源加载情况。解析卡住时靠这条判断是不是根本没脚本可用
             // （0 个就是脚本没加载上）；写盘失败不影响启动。
