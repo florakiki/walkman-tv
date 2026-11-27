@@ -1124,6 +1124,17 @@ class PlaybackController(
         sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, builtinGainEnabled)
         sendPlaybackCommand(PlaybackService.CMD_SET_FORCE_SOFTWARE_DECODING, forceSoftwareDecoding)
         applyAudioOffload()
+        // 第二十轮：记下主进程发给服务的值——跟服务那边的 [音频设置] 对上，
+        // 两边不一样就说明自定义命令没送到。
+        runCatching {
+            CrashDiagnostics.recordAudioState(
+                appContext,
+                "主进程",
+                "发给服务：增益${if (builtinGainEnabled) "开" else "关"}" +
+                    "、直通${if (audioOffloadEnabled) "开" else "关"}" +
+                    "、强制软解${if (forceSoftwareDecoding) "开" else "关"}",
+            )
+        }
         registerLevelMessenger(controller)
         // 播放进程死后重建：跑之前定好的恢复动作（换源 / 跳下一首 / 从头再播）。
         val recovery = pendingRecovery

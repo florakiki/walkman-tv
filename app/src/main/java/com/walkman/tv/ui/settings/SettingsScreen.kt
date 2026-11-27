@@ -270,6 +270,16 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )
+            // 第二十轮：直通开着时增益开关是摆设（音频走硬件直通、绕过增益），
+            // 在这里直接说出来，免得拨了开关没效果还以为开关坏了。
+            if (settings.audioOffloadEnabled) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "硬件直通已开启：音频走硬件直通，内置增益不生效。想用增益请先关闭“Hi-Res 硬件直通”。",
+                    color = AppColors.Warning,
+                    fontSize = 11.sp,
+                )
+            }
         }
 
         Section("歌词翻译") {

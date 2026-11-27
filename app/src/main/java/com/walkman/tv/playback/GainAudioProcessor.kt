@@ -57,6 +57,14 @@ class GainAudioProcessor : BaseAudioProcessor() {
     /** Off ⇒ pure pass-through (bytes copied unchanged). */
     @Volatile var enabled: Boolean = true
 
+    /** 诊断用（第二十轮）：累计进来的采样数 / 其中开着增益处理的采样数。服务在
+     *  解码器初始化时把这两个数写进诊断——放着歌这两个数一直是 0，说明处理链
+     *  被绕过了（硬件直通），增益开关自然没效果。 */
+    @Volatile var samplesSeen: Long = 0
+        private set
+    @Volatile var samplesGained: Long = 0
+        private set
+
     private var bytesPerSample = 2
     private var floatSamples = false
 
@@ -74,6 +82,10 @@ class GainAudioProcessor : BaseAudioProcessor() {
     override fun queueInput(inputBuffer: ByteBuffer) {
         val remaining = inputBuffer.remaining()
         if (remaining == 0) return
+        // 第二十轮：记处理量（bytesPerSample 在 onConfigure 里定好，float 也是 4）。
+        val sampleCount = remaining / bytesPerSample
+        samplesSeen += sampleCount
+        if (enabled) samplesGained += sampleCount
         val output = replaceOutputBuffer(remaining).order(inputBuffer.order())
         if (!enabled) {
             output.put(inputBuffer)

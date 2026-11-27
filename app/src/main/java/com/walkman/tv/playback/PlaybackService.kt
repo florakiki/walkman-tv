@@ -80,6 +80,9 @@ class PlaybackService : MediaSessionService() {
     @Volatile
     var forceSoftwareDecoding: Boolean = false
 
+    /** 上次写进 [音频设置] 诊断的解码器名（只在换解码器时再写，免得每首歌刷屏）。 */
+    private var lastAudioStateDecoder: String? = null
+
     /** 主进程的音量 Messenger（注册后才发；发失败 / 断了就停，下次注册再发）。 */
     @Volatile
     private var levelMessenger: Messenger? = null
@@ -124,6 +127,9 @@ class PlaybackService : MediaSessionService() {
             }
         } ?: return
         player = exoPlayer
+        // 第二十轮：记下建播放器时的音频实况（开关默认值、直通模式）。直通开着时
+        // 解码器永远不会初始化（音频走 DSP），那时这条就是唯一的音频证据。
+        runCatching { recordAudioState(null) }
         // 记下实际在解码的解码器名（FFmpeg 叫 "ffmpeg"，平台叫 c2.android.* 等）：
         // 播放进程原生崩溃后，主进程读这条就知道是哪条解码器在崩（第十八轮）。
         exoPlayer.addAnalyticsListener(object : AnalyticsListener {
@@ -134,6 +140,12 @@ class PlaybackService : MediaSessionService() {
                 initializationDurationMs: Long,
             ) {
                 runCatching { PlaybackCrashGuard.writeDecoder(this@PlaybackService, decoderName) }
+                // 第二十轮：解码器换了才记一条音频实况（带增益处理采样数）——增益处理
+                // 采样数 >0 说明处理链在跑、增益在生效；放着歌一直是 0 说明链被绕过了。
+                if (decoderName != lastAudioStateDecoder) {
+                    lastAudioStateDecoder = decoderName
+                    runCatching { recordAudioState(decoderName) }
+                }
             }
         })
         mediaSession = runCatching {
@@ -190,13 +202,21 @@ class PlaybackService : MediaSessionService() {
         ): ListenableFuture<SessionResult> {
             when (customCommand.customAction) {
                 CMD_SET_GAIN_ENABLED -> {
-                    gainEnabled = args.getBoolean(ARG_ENABLED, true)
+                    val next = args.getBoolean(ARG_ENABLED, true)
+                    val changed = next != gainEnabled
+                    gainEnabled = next
                     gainProcessor.enabled = gainEnabled
                     Log.d(TAG, "gain enabled=$gainEnabled")
+                    // 第二十轮：值变了才记——开关拨了没效果时，诊断里没有这条就说明
+                    // 命令根本没到服务；有这条就说明服务收到了，问题在后面。
+                    if (changed) runCatching { recordAudioState(lastAudioStateDecoder) }
                 }
                 CMD_SET_FORCE_SOFTWARE_DECODING -> {
-                    forceSoftwareDecoding = args.getBoolean(ARG_ENABLED, false)
+                    val next = args.getBoolean(ARG_ENABLED, false)
+                    val changed = next != forceSoftwareDecoding
+                    forceSoftwareDecoding = next
                     Log.d(TAG, "force software decoding=$forceSoftwareDecoding (applies to next track)")
+                    if (changed) runCatching { recordAudioState(lastAudioStateDecoder) }
                 }
                 CMD_REGISTER_LEVEL_MESSENGER -> {
                     levelMessenger = args.getParcelable(ARG_MESSENGER)
@@ -216,6 +236,25 @@ class PlaybackService : MediaSessionService() {
             false
         }
         return "FFmpeg 库：${if (available) "可用" else "不可用"}，MP3：${if (mp3) "支持" else "不支持"}"
+    }
+
+    /**
+     * 把当前音频实况写进诊断（第二十轮）：服务收到的开关值、直通模式、实际解码
+     * 器、增益处理器处理过的采样数。增益开关开/关没效果时，这条就是定性的证据。
+     */
+    private fun recordAudioState(decoder: String?) {
+        val offloadMode = player?.trackSelectionParameters?.audioOffloadPreferences?.audioOffloadMode
+        val offload = if (offloadMode ==
+            TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
+        ) "开" else "关"
+        val detail = buildString {
+            appendLine("增益开关：${if (gainEnabled) "开" else "关"}（服务已收到）")
+            appendLine("硬件直通：$offload")
+            appendLine("强制软解：${if (forceSoftwareDecoding) "开" else "关"}")
+            appendLine("解码器：${decoder ?: "（还没解码）"}")
+            appendLine("增益已处理：${gainProcessor.samplesSeen} 采样（其中增益采样 ${gainProcessor.samplesGained}）")
+        }
+        CrashDiagnostics.recordAudioState(this, ":playback", detail)
     }
 
     /**

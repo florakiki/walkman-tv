@@ -268,6 +268,21 @@ object CrashDiagnostics {
         appendFailureEntry(context, entry)
     }
 
+    /**
+     * 记音频设置实况（第二十轮）：主进程发了什么、:playback 收到什么、实际在
+     * 用哪个解码器、增益处理器到底处理了多少采样。增益开关开/关没效果时靠这条
+     * 定性——服务没收到命令、处理链被直通绕过、还是增益本身没生效，一看就知道。
+     */
+    fun recordAudioState(context: Context, where: String, detail: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[音频设置] $time")
+            appendLine("位置：$where")
+            appendLine(detail.trimEnd())
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
     /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
     private fun appendFailureEntry(context: Context, entry: String) {
         runCatching {
