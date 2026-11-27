@@ -1,21 +1,25 @@
 package com.walkman.tv.playback
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
+import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Messenger
 import androidx.core.content.ContextCompat
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
-import androidx.media3.exoplayer.DefaultLoadControl
-import androidx.media3.exoplayer.DefaultRenderersFactory
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.audio.AudioSink
-import androidx.media3.exoplayer.audio.DefaultAudioSink
-import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionToken
+import com.google.common.util.concurrent.ListenableFuture
 import com.walkman.tv.data.store.PlaybackSnapshot
 import com.walkman.tv.data.model.Quality
 import com.walkman.tv.data.model.Track
@@ -31,6 +35,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -57,9 +62,12 @@ data class PlaybackState(
 }
 
 /**
- * Single source of truth for playback (iOS `PlaybackEngine`). Owns one ExoPlayer; resolves each
- * track's URL lazily via [SourceManager] on switch (URLs expire), records history, loads lyrics,
- * and reuses the same player for MV video.
+ * Single source of truth for playback (iOS `PlaybackEngine`). The ExoPlayer lives in the
+ * `:playback` process (PlaybackService) and is driven here through a MediaController; resolves
+ * each track's URL lazily via [SourceManager] on switch (URLs expire), records history, loads
+ * lyrics, and reuses the same player for MV video. If the playback process dies (decoder
+ * SIGSEGV), this controller restarts it and recovers (cross-source / skip) — the app never
+ * exits to the desktop.
  */
 class PlaybackController(
     context: Context,
@@ -130,28 +138,67 @@ class PlaybackController(
     @Volatile private var probingUrl: String? = null
     private var probeJob: Job? = null
 
-    private val audioLevelProcessor = AudioLevelProcessor { level ->
-        _audioLevel.value = level
-    }
+    /**
+     * 远程播放器（第十五轮）：ExoPlayer 活在 `:playback` 独立进程里（PlaybackService），
+     * 主进程通过 MediaController 连它。所有播放控制都走这个 Player 接口；它为空时
+     * （刚启动 / 播放进程刚死 / 还没连上）调用是 no-op，绝不让 UI 因为播放器没连上就崩。
+     * 播放进程死了它就失效（onDisconnected），主进程重建一个新的连上去。
+     */
+    private val _remotePlayer = MutableStateFlow<Player?>(null)
 
-    /** Built-in gain (~+6 dB, soft-limited). Runs in the sink's processor chain after
-     *  [audioLevelProcessor]; toggled from settings, default on. */
-    private val gainProcessor = GainAudioProcessor()
+    /** 播放页 PlayerView 绑的播放器（只读快照流；MV 播放时才用到）。 */
+    val playerFlow: StateFlow<Player?> = _remotePlayer.asStateFlow()
 
-    /** Settings-driven switch for [gainProcessor]; wired in AppContainer.bootstrap. */
+    /** 同步读当前远程播放器（控制方法内部用；可能为 null）。 */
+    private val player: Player? get() = _remotePlayer.value
+
+    private val appContext = context.applicationContext
+
+    /** 主进程收音量的 Messenger（:playback 里的 AudioLevelProcessor 回推，10Hz 节流）。 */
+    private val levelMessenger = Messenger(
+        Handler(Looper.getMainLooper()) { msg ->
+            if (msg.what == PlaybackService.MSG_AUDIO_LEVEL) {
+                _audioLevel.value = msg.data?.getFloat(PlaybackService.ARG_LEVEL, 0f) ?: 0f
+            }
+            true
+        },
+    )
+
+    /** :playback 连接（MediaController.buildAsync 的 future；重建时取消旧的）。 */
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+
+    /** 当前连着的 MediaController（发自定义命令用；Player 接口上没有 sendCustomCommand）。
+     *  跟 _remotePlayer 同步：连上时设、死了 / 释放时清。 */
+    private var mediaController: MediaController? = null
+
+    /** 播放进程死后重建连接时要跑的恢复动作（换源 / 跳下一首 / 从头再播），见
+     *  [handlePlaybackProcessDeath]；连上后跑一次就清掉。 */
+    private var pendingRecovery: (() -> Unit)? = null
+
+    /** 同一首歌死过几次（内存计数；播起来了清掉，用户主动点新歌也清掉）。
+     *  死两次就跳下一首并写进拉黑文件（PlaybackCrashGuard）。 */
+    private val playbackDeathsByTrack = mutableMapOf<String, Int>()
+
+    /** 增益开关（设置 → 增益）：值存在这儿，发给 :playback（见 [sendPlaybackCommand]）；
+     *  播放器在 :playback 进程里，GainAudioProcessor 也在那儿。默认开，跟设置默认值一致。 */
     @Volatile var builtinGainEnabled: Boolean = true
         set(value) {
             field = value
-            gainProcessor.enabled = value
+            sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, value)
         }
 
     /** 强制软件解码：只用系统自带的软件解码器（c2.android.* / OMX.google.*），绕开部分电视、盒子
-     *  厂商硬件解码器的闪退或无声问题。解码器在每次准备新歌时挑选，所以切换后从下一首开始生效。 */
+     *  厂商硬件解码器的闪退或无声问题。解码器在每次准备新歌时挑选，所以切换后从下一首开始生效。
+     *  值存在这儿，发给 :playback；重建连接时重发。 */
     @Volatile var forceSoftwareDecoding: Boolean = false
+        set(value) {
+            field = value
+            sendPlaybackCommand(PlaybackService.CMD_SET_FORCE_SOFTWARE_DECODING, value)
+        }
 
-    val player: ExoPlayer = buildPlayer(context.applicationContext, audioLevelProcessor, gainProcessor, { forceSoftwareDecoding })
-
-    private val appContext = context.applicationContext
+    /** Hi-Res 直通开关（设置 → 音频解码）：值存在这儿，applyAudioOffload 发给远程播放器；
+     *  重建连接时重发（光靠 setAudioOffloadEnabled 那次发，死后重建就丢了）。 */
+    private var audioOffloadEnabled: Boolean = false
 
     private companion object {
         /** ExoPlayer error codes that indicate the URL was fetched fine but the bytes can't be
@@ -187,118 +234,12 @@ class PlaybackController(
         /** 点播前验地址（AudioSpecProbe.validate）最多等多久：超时就放行，绝不把播放卡死。 */
         const val GATE_TIMEOUT_MS = 5_000L
 
-        /**
-         * Build the ExoPlayer with settings tuned for music playback on Android TV:
-         *
-         * - Larger LoadControl buffers (60s max / 30s min target) so a Hi-Res FLAC at
-         *   ~10 Mbps doesn't constantly underrun on slower connections; the start
-         *   threshold (3s) keeps perceived play latency low.
-         * - DefaultAudioSink with audio offload DISABLED by default — offload would route
-         *   the stream to DSP/HDMI passthrough and bypass the processor chain (built-in
-         *   gain + waveform meter). Users who want bit-perfect PCM/FLAC passthrough can
-         *   switch Hi-Res 直通 on in settings; AppContainer applies it from there.
-         * - DefaultRenderersFactory in PREFER_EXTENSION mode so the bundled FLAC /
-         *   OPUS / VORBIS extension renderers (when present) win over the slower
-         *   MediaCodec path.
-         */
-        fun buildPlayer(
-            appContext: android.content.Context,
-            levelProcessor: AudioLevelProcessor,
-            gainProcessor: GainAudioProcessor,
-            softwareOnly: () -> Boolean,
-        ): ExoPlayer {
-            val loadControl = DefaultLoadControl.Builder()
-                .setBufferDurationsMs(
-                    /* minBufferMs = */ 30_000,
-                    /* maxBufferMs = */ 60_000,
-                    /* bufferForPlaybackMs = */ 3_000,
-                    /* bufferForPlaybackAfterRebufferMs = */ 5_000,
-                )
-                .setPrioritizeTimeOverSizeThresholds(true)
-                .build()
+        /** 同一首歌死两次就跳下一首并拉黑（见 handlePlaybackProcessDeath）。 */
+        const val MAX_DEATHS_PER_TRACK = 2
 
-            // Prefer bundled FLAC/OPUS/VORBIS extension renderers over MediaCodec; pipe audio at
-            // float precision so 24-bit sources don't get prematurely truncated to 16-bit PCM.
-            // (Audio offload is opted in via TrackSelectionParameters below — the deprecated
-            //  DefaultRenderersFactory.setEnableAudioOffload was removed in Media3 1.4.)
-            //
-            // Anonymous subclass overrides buildAudioSink so we can append our
-            // [AudioLevelProcessor] to the DefaultAudioSink's processor chain. The processor
-            // forwards bytes unchanged, so audio quality is preserved. When the OS chooses
-            // audio offload (DSP / HDMI passthrough / A2DP offload), this chain is bypassed
-            // entirely and the processor stops receiving samples — the consumer naturally
-            // falls back to a synthetic waveform.
-            val renderersFactory = object : DefaultRenderersFactory(appContext) {
-                override fun buildAudioSink(
-                    context: android.content.Context,
-                    enableFloatOutput: Boolean,
-                    enableAudioTrackPlaybackParams: Boolean,
-                ): AudioSink? {
-                    return DefaultAudioSink.Builder(context)
-                        .setEnableFloatOutput(enableFloatOutput)
-                        .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
-                        .setAudioProcessorChain(
-                            // Order matters: level meter first (measures pre-gain),
-                            // gain second (soft-limited +6 dB, see GainAudioProcessor).
-                            DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor, gainProcessor),
-                        )
-                        .build()
-                }
-            }
-                .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-                .setMediaCodecSelector { mimeType, secure, tunneling ->
-                    val all = MediaCodecSelector.DEFAULT.getDecoderInfos(mimeType, secure, tunneling)
-                    // 只管音频；MV 视频仍走硬解，软解 1080p 在盒子上会卡。没有可用的软件解码器时退回
-                    // 全部，宁可走硬解也别直接放不了。
-                    if (!softwareOnly() || !androidx.media3.common.MimeTypes.isAudio(mimeType)) all
-                    else all.filter { it.softwareOnly }.ifEmpty { all }
-                }
-                .setEnableAudioFloatOutput(true)
-                .setEnableAudioTrackPlaybackParams(true)
-
-            val audioAttrs = AudioAttributes.Builder()
-                .setUsage(C.USAGE_MEDIA)
-                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                .build()
-
-            // Use the 1-arg constructor + setRenderersFactory(): the 2-arg Builder(Context,
-            // RenderersFactory) overload is ambiguous with Builder(Context, MediaSource.Factory).
-            val player = ExoPlayer.Builder(appContext)
-                .setRenderersFactory(renderersFactory)
-                .setLoadControl(loadControl)
-                // handleAudioFocus = false（2026-11-26）：之前开着时，系统 / 别的 App 一抢音频焦点，
-                // ExoPlayer 就把音量压到约 20%（ducking），焦点回来再恢复——同一首歌里音量
-                // 一会儿有一会儿没有、反复切好几次，听着就像增益在来回开关。增益本身在代码
-                // 里没有任何中途重置的路径（播放器只建一次、换源一首只换一次、开关只响应
-                // 用户点按），所以这条反复压音量的路只能是焦点 ducking。关掉它：同一首歌
-                // 从头到尾音量只由增益开关决定。代价：别的 App 放音频时音乐不再自动让路
-                // （不会暂停 / 压低），要停得手动按一下——电视上没电话，这点可以接受。
-                .setAudioAttributes(audioAttrs, /* handleAudioFocus = */ false)
-                .setHandleAudioBecomingNoisy(true)
-                .build()
-
-            // Audio offload defaults to DISABLED here (2026-11-26): offload hands the
-            // compressed stream straight to the DSP / HDMI passthrough and bypasses the
-            // whole DefaultAudioSink processor chain — including the built-in gain. With
-            // the old ENABLED default, whether a track got the gain depended on whether
-            // ExoPlayer chose offload for that track's format, i.e. the gain could
-            // silently drop out per track (and the setting default is off, see
-            // SettingsStore.audioOffloadEnabled). The settings collector in AppContainer
-            // still turns offload on for users who switch Hi-Res 直通 on — this default
-            // only closes the window where a track could offload before settings apply.
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setAudioOffloadPreferences(
-                    TrackSelectionParameters.AudioOffloadPreferences.Builder()
-                        .setAudioOffloadMode(
-                            TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED,
-                        )
-                        .build(),
-                )
-                .build()
-            return player
-        }
+        /** 等远程播放器连上最多等多久（playResolvedOrFail 里 awaitPlayer 用）。 */
+        const val AWAIT_PLAYER_TIMEOUT_MS = 5_000L
     }
-    private var serviceStarted = false
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val _state = MutableStateFlow(PlaybackState())
@@ -314,103 +255,114 @@ class PlaybackController(
 
     private var resolveJob: Job? = null
 
-    init {
-        player.addListener(object : Player.Listener {
-            override fun onIsPlayingChanged(isPlaying: Boolean) {
-                _state.value = _state.value.copy(isPlaying = isPlaying)
-                // Pause: drop the audio level immediately so the waveform settles instead
-                // of holding whatever amplitude the last decoded chunk reported.
-                if (!isPlaying) _audioLevel.value = 0f
-            }
+    /**
+     * 远程播放器的回调（挂在 MediaController 上；重建连接时重新挂）。
+     * 只处理 Kotlin 层能收到的事：播 / 停、播完切歌、格式拒收降级、网络重试、
+     * 换源。原生 SIGSEGV 触发不了这里（进程直接死了），那靠 onDisconnected。
+     */
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            _state.value = _state.value.copy(isPlaying = isPlaying)
+            // Pause: drop the audio level immediately so the waveform settles instead
+            // of holding whatever amplitude the last decoded chunk reported.
+            if (!isPlaying) _audioLevel.value = 0f
+        }
 
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_ENDED) {
-                    if (_state.value.isMv) exitMv() else handleEnded()
-                }
-                if (playbackState == Player.STATE_READY) {
-                    // A track actually started — clear the consecutive-failure streak.
-                    consecutiveFailures = 0
-                    // ... and drop the resolve-time notice ("已自动换源" etc.): it was only
-                    // relevant while the URL was being found; once the song is playing it is
-                    // stale and must not linger on the player / home panel status line.
-                    // Real failures still surface via error / failAndAdvance (a failed track
-                    // never reaches READY, so its warning is untouched here).
-                    _state.value = _state.value.copy(durationMs = player.duration.coerceAtLeast(0), warning = null)
-                    // Start resolving the next track in the background while this one plays.
-                    preloadNext()
-                }
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState == Player.STATE_ENDED) {
+                if (_state.value.isMv) exitMv() else handleEnded()
             }
+            if (playbackState == Player.STATE_READY) {
+                // A track actually started — clear the consecutive-failure streak.
+                consecutiveFailures = 0
+                // 这首歌播起来了：之前的死亡计数清掉（它能播，不是一播就死的歌）。
+                _state.value.currentTrack?.id?.let { playbackDeathsByTrack.remove(it) }
+                // ... and drop the resolve-time notice ("已自动换源" etc.): it was only
+                // relevant while the URL was being found; once the song is playing it is
+                // stale and must not linger on the player / home panel status line.
+                // Real failures still surface via error / failAndAdvance (a failed track
+                // never reaches READY, so its warning is untouched here).
+                _state.value = _state.value.copy(durationMs = (player?.duration ?: 0L).coerceAtLeast(0), warning = null)
+                // Start resolving the next track in the background while this one plays.
+                preloadNext()
+            }
+        }
 
-            override fun onPlayerError(error: PlaybackException) {
-                // Format/codec rejections are the "encrypted .mgg" / "actually MP3 not FLAC" case
-                // from spec §3 — re-cascade from one tier below the current attempt. Network /
-                // unauthorized errors get surfaced as-is.
-                val isFormatReject = error.errorCode in FORMAT_REJECT_CODES
-                val current = lastAttemptedQuality
-                val track = _state.value.currentTrack
-                // Format reject already at the lowest tier: this platform has nothing left —
-                // try the same song from another platform before giving up on it.
-                if (isFormatReject && track != null && current == Quality.K128) {
-                    tryCrossSourceOrAdvance(track, error.errorCodeName)
-                    return
-                }
-                if (isFormatReject && track != null && current != null && current != Quality.K128) {
-                    val full = Quality.orderedHighToLow
-                    val idx = full.indexOf(current)
-                    val below = if (idx >= 0 && idx + 1 < full.size) full[idx + 1] else Quality.K128
+        override fun onPlayerError(error: PlaybackException) {
+            // Format/codec rejections are the "encrypted .mgg" / "actually MP3 not FLAC" case
+            // from spec §3 — re-cascade from one tier below the current attempt. Network /
+            // unauthorized errors get surfaced as-is.
+            val isFormatReject = error.errorCode in FORMAT_REJECT_CODES
+            val current = lastAttemptedQuality
+            val track = _state.value.currentTrack
+            // Format reject already at the lowest tier: this platform has nothing left —
+            // try the same song from another platform before giving up on it.
+            if (isFormatReject && track != null && current == Quality.K128) {
+                tryCrossSourceOrAdvance(track, error.errorCodeName)
+                return
+            }
+            if (isFormatReject && track != null && current != null && current != Quality.K128) {
+                val full = Quality.orderedHighToLow
+                val idx = full.indexOf(current)
+                val below = if (idx >= 0 && idx + 1 < full.size) full[idx + 1] else Quality.K128
+                android.util.Log.w(
+                    "PlaybackController",
+                    "format reject @ ${current.key} (${error.errorCodeName}); re-cascading from ${below.key}",
+                )
+                _state.value = _state.value.copy(
+                    warning = "${current.displayName} 格式不支持，降级到 ${below.displayName}",
+                )
+                networkRetryCount = 0 // format error path — separate from the network counter
+                playAt(_state.value.index, qualityCap = below)
+                return
+            }
+            // Transient network — exponential backoff retry up to MAX_NETWORK_RETRIES.
+            // After that, try another platform for the same song before auto-skipping.
+            if (error.errorCode in NETWORK_RETRY_CODES && track != null) {
+                if (networkRetryCount < MAX_NETWORK_RETRIES) {
+                    networkRetryCount++
+                    val delayMs = 500L shl (networkRetryCount - 1) // 500ms / 1s / 2s
                     android.util.Log.w(
                         "PlaybackController",
-                        "format reject @ ${current.key} (${error.errorCodeName}); re-cascading from ${below.key}",
+                        "network error (${error.errorCodeName}); retry ${networkRetryCount}/$MAX_NETWORK_RETRIES in ${delayMs}ms",
                     )
                     _state.value = _state.value.copy(
-                        warning = "${current.displayName} 格式不支持，降级到 ${below.displayName}",
+                        warning = "网络不稳定，正在重试 ($networkRetryCount/$MAX_NETWORK_RETRIES)…",
+                        resolving = true,
+                        error = null,
                     )
-                    networkRetryCount = 0 // format error path — separate from the network counter
-                    playAt(_state.value.index, qualityCap = below)
-                    return
-                }
-                // Transient network — exponential backoff retry up to MAX_NETWORK_RETRIES.
-                // After that, try another platform for the same song before auto-skipping.
-                if (error.errorCode in NETWORK_RETRY_CODES && track != null) {
-                    if (networkRetryCount < MAX_NETWORK_RETRIES) {
-                        networkRetryCount++
-                        val delayMs = 500L shl (networkRetryCount - 1) // 500ms / 1s / 2s
-                        android.util.Log.w(
-                            "PlaybackController",
-                            "network error (${error.errorCodeName}); retry ${networkRetryCount}/$MAX_NETWORK_RETRIES in ${delayMs}ms",
-                        )
-                        _state.value = _state.value.copy(
-                            warning = "网络不稳定，正在重试 ($networkRetryCount/$MAX_NETWORK_RETRIES)…",
-                            resolving = true,
-                            error = null,
-                        )
-                        val trackIdAtRetry = track.id
-                        scope.launch {
-                            kotlinx.coroutines.delay(delayMs)
-                            // Guard: user may have skipped to a different track during the delay.
-                            if (_state.value.currentTrack?.id == trackIdAtRetry) {
-                                playAt(_state.value.index, qualityCap = lastAttemptedQuality)
-                            }
+                    val trackIdAtRetry = track.id
+                    scope.launch {
+                        kotlinx.coroutines.delay(delayMs)
+                        // Guard: user may have skipped to a different track during the delay.
+                        if (_state.value.currentTrack?.id == trackIdAtRetry) {
+                            playAt(_state.value.index, qualityCap = lastAttemptedQuality)
                         }
-                        return
                     }
-                    // Retries exhausted — try another platform for the same song first.
-                    android.util.Log.w(
-                        "PlaybackController",
-                        "network retries exhausted on ${track.name}; trying other sources",
-                    )
-                    tryCrossSourceOrAdvance(track, "网络不稳定")
                     return
                 }
-                // Any other error — try another platform for the same song; only auto-skip
-                // (or stop after too many in a row) once no platform can play it.
-                if (track != null) {
-                    tryCrossSourceOrAdvance(track, error.errorCodeName)
-                    return
-                }
-                failAndAdvance(error.errorCodeName)
+                // Retries exhausted — try another platform for the same song first.
+                android.util.Log.w(
+                    "PlaybackController",
+                    "network retries exhausted on ${track.name}; trying other sources",
+                )
+                tryCrossSourceOrAdvance(track, "网络不稳定")
+                return
             }
-        })
+            // Any other error — try another platform for the same song; only auto-skip
+            // (or stop after too many in a row) once no platform can play it.
+            if (track != null) {
+                tryCrossSourceOrAdvance(track, error.errorCodeName)
+                return
+            }
+            failAndAdvance(error.errorCodeName)
+        }
+    }
+
+    init {
+        // 连上 :playback 里的远程播放器（MediaController）。连接是异步的：刚启动要
+        // 等一会儿；播放进程死了重建也要等一会儿。播歌前 awaitPlayer 会等它。
+        connectController()
         startPositionTicker()
     }
 
@@ -451,7 +403,13 @@ class PlaybackController(
         if (s.queue.isEmpty() || s.currentIndex !in s.queue.indices) return
         // Stage the queue without auto-play first, so the UI shows the track immediately.
         _state.value = _state.value.copy(queue = s.queue, index = s.currentIndex, isPlaying = false)
-        if (s.wasPlaying) playAt(s.currentIndex)
+        if (s.wasPlaying) {
+            // 上次播到一半原生闪退过的歌（:playback 死了），这次启动别再自动播它，
+            // 否则一启动就又死一次。跳到下一首；整单就这一首时停在原地等用户点。
+            val trackId = s.queue[s.currentIndex].id
+            val startIndex = if (PlaybackCrashGuard.isCrashed(appContext, trackId)) s.currentIndex + 1 else s.currentIndex
+            if (startIndex < s.queue.size) playAt(startIndex)
+        }
     }
 
     fun playTrack(track: Track) = setQueue(listOf(track), 0, true)
@@ -466,13 +424,15 @@ class PlaybackController(
             lastAttemptedSources = emptyList()
             networkRetryCount = 0
             crossSourceTriedFor = null
+            // 用户主动点了一首新歌：这首歌之前的死亡计数清掉（重新给一次机会）。
+            playbackDeathsByTrack.remove(track.id)
             // A new track is starting — the old preload (if any) is for a different next.
             preloadJob?.cancel()
             preloadedForIndex = -1
             // Silence the previous song right away. Resolving can take a long time with a slow or
             // dead source (every quality tier × 15s script timeout, then other-platform lookups),
             // and the old track playing on under the new title looked like "切歌没成功".
-            runCatching { player.stop() }
+            runCatching { player?.stop() }
             _state.value = _state.value.copy(positionMs = 0)
         }
         val effectivePreferred = qualityCap ?: preferredQuality
@@ -584,8 +544,33 @@ class PlaybackController(
             // Successful resolve + setMediaItem → reset the network retry counter so the
             // next track gets a fresh budget.
             networkRetryCount = 0
-            player.setMediaItem(item)
-            player.prepare()
+            // 等远程播放器连上（刚启动 / 播放进程死后重建要一点时间）；连不上就当这首失败。
+            val remote = awaitPlayer() ?: run {
+                failAndAdvance("播放进程未连接", r.attemptedSources)
+                return
+            }
+            // 留痕（第十五轮）：解析出地址后、setMediaItem 之前，把赢家地址写进诊断
+            // 文件 + 状态文件。播放进程原生闪退死后，主进程靠这两条知道它当时在播
+            // 哪条地址，也能验证隔离到底生效没有。写盘失败绝不拦播放。
+            runCatching {
+                CrashDiagnostics.recordNowPlaying(
+                    appContext,
+                    "${track.name} - ${track.singer}",
+                    r.origin.label,
+                    r.quality.displayName,
+                    r.url,
+                )
+                PlaybackCrashGuard.writeAttempt(
+                    appContext,
+                    track.id,
+                    "${track.name} - ${track.singer}",
+                    r.url,
+                    r.origin.label,
+                    r.quality.displayName,
+                )
+            }
+            remote.setMediaItem(item)
+            remote.prepare()
             // Fire the file-header probe so the badge can later clamp the claimed tier
             // down if the bytes turn out to be lower-grade than the script reported.
             // Spec §5.4: clear current spec first, run async, validate URL is still
@@ -629,12 +614,7 @@ class PlaybackController(
                     }
                 }
             }
-            // NOTE: MediaSessionService startup is currently disabled — Android 12+ kills
-            // the process via ForegroundServiceDidNotStartInTimeException if the service
-            // doesn't post a media notification within 5s, which races with our URL-resolve
-            // path. Re-enable once a proper MediaNotification.Provider is in place.
-            // ensureService()
-            player.playWhenReady = true
+            remote.playWhenReady = true
             _state.value = _state.value.copy(
                 resolving = false,
                 warning = r.warning,
@@ -681,7 +661,7 @@ class PlaybackController(
     private fun failAndAdvance(reason: String, attemptedSources: List<String> = emptyList()) {
         // Stop whatever is still loaded (e.g. a cascade retry's half-played attempt) so a failed
         // track actually goes silent.
-        runCatching { player.stop() }
+        runCatching { player?.stop() }
         networkRetryCount = 0
         consecutiveFailures++
         val track = _state.value.currentTrack
@@ -804,12 +784,19 @@ class PlaybackController(
      * is exposed as a settings switch. Takes effect on the next format change / track switch.
      */
     fun setAudioOffloadEnabled(enabled: Boolean) {
-        val mode = if (enabled) {
+        audioOffloadEnabled = enabled
+        applyAudioOffload()
+    }
+
+    /** 把 Hi-Res 直通开关发给远程播放器（没连上就等连上时重发，见 onControllerConnected）。 */
+    private fun applyAudioOffload() {
+        val remote = player ?: return
+        val mode = if (audioOffloadEnabled) {
             TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
         } else {
             TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED
         }
-        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+        remote.trackSelectionParameters = remote.trackSelectionParameters.buildUpon()
             .setAudioOffloadPreferences(
                 TrackSelectionParameters.AudioOffloadPreferences.Builder()
                     .setAudioOffloadMode(mode)
@@ -824,8 +811,9 @@ class PlaybackController(
     }
 
     private fun togglePlayInternal() {
-        if (player.isPlaying) {
-            player.pause()
+        val remote = player
+        if (remote?.isPlaying == true) {
+            remote.pause()
             return
         }
         // Cold-start path: restoreSnapshot() stages the queue + index in [_state] but only
@@ -834,10 +822,10 @@ class PlaybackController(
         // no-op. Lazy-resolve the current track now so the play button actually starts the
         // song that the UI is already showing.
         val s = _state.value
-        if (player.mediaItemCount == 0 && s.queue.isNotEmpty() && s.index in s.queue.indices) {
+        if ((remote?.mediaItemCount ?: 0) == 0 && s.queue.isNotEmpty() && s.index in s.queue.indices) {
             playAt(s.index)
         } else {
-            player.play()
+            remote?.play()
         }
     }
 
@@ -853,7 +841,7 @@ class PlaybackController(
             s.shuffle -> if (s.queue.size <= 1) s.index else randomOther(s.index, s.queue.size)
             s.index + 1 < s.queue.size -> s.index + 1
             s.repeatMode != RepeatMode.OFF -> 0
-            else -> { player.pause(); return }
+            else -> { player?.pause(); return }
         }
         playAt(nextIdx)
     }
@@ -866,7 +854,7 @@ class PlaybackController(
     private fun prevInternal() {
         val s = _state.value
         if (s.queue.isEmpty()) return
-        if (player.currentPosition > 3000) { player.seekTo(0); return }
+        if ((player?.currentPosition ?: 0L) > 3000) { player?.seekTo(0); return }
         val prevIdx = when {
             s.shuffle -> if (s.queue.size <= 1) s.index else randomOther(s.index, s.queue.size)
             s.index - 1 >= 0 -> s.index - 1
@@ -875,18 +863,22 @@ class PlaybackController(
         playAt(prevIdx)
     }
 
-    fun seekTo(ms: Long) = player.seekTo(ms.coerceAtLeast(0))
+    fun seekTo(ms: Long) {
+        player?.seekTo(ms.coerceAtLeast(0))
+    }
 
     fun setRepeatMode(mode: RepeatMode) { _state.value = _state.value.copy(repeatMode = mode) }
 
     fun toggleShuffle() { _state.value = _state.value.copy(shuffle = !_state.value.shuffle) }
 
     fun stop() {
-        player.stop()
-        player.clearMediaItems()
+        player?.stop()
+        player?.clearMediaItems()
         preloadJob?.cancel()
         preloadCache.clear()
         preloadedForIndex = -1
+        PlaybackCrashGuard.clearAttempt(appContext)
+        playbackDeathsByTrack.clear()
         _state.value = PlaybackState()
         _lyrics.value = emptyList()
     }
@@ -896,10 +888,13 @@ class PlaybackController(
     /** Play an MV video url on the same player (UI attaches a PlayerView for output). */
     fun playMvUrl(url: String) {
         resolveJob?.cancel()
-        player.setMediaItem(MediaItem.fromUri(url))
-        player.prepare()
-        player.playWhenReady = true
         _state.value = _state.value.copy(isMv = true, resolving = false, error = null)
+        scope.launch {
+            val remote = awaitPlayer() ?: return@launch
+            remote.setMediaItem(MediaItem.fromUri(url))
+            remote.prepare()
+            remote.playWhenReady = true
+        }
     }
 
     /** Exit MV and resume the current audio track. */
@@ -913,7 +908,7 @@ class PlaybackController(
 
     private fun handleEnded() {
         if (_state.value.repeatMode == RepeatMode.ONE) {
-            player.seekTo(0); player.play(); return
+            player?.seekTo(0); player?.play(); return
         }
         next()
     }
@@ -926,15 +921,6 @@ class PlaybackController(
         }
     }
 
-    /** Start the MediaSessionService once, so background audio + remote controls work. */
-    private fun ensureService() {
-        if (serviceStarted) return
-        serviceStarted = true
-        runCatching {
-            ContextCompat.startForegroundService(appContext, Intent(appContext, PlaybackService::class.java))
-        }
-    }
-
     private fun randomOther(current: Int, size: Int): Int {
         var i = current
         while (i == current) i = Random.nextInt(size)
@@ -944,10 +930,11 @@ class PlaybackController(
     private fun startPositionTicker() {
         scope.launch {
             while (true) {
-                if (player.isPlaying || _state.value.isMv) {
+                val remote = player
+                if (remote?.isPlaying == true || _state.value.isMv) {
                     _state.value = _state.value.copy(
-                        positionMs = player.currentPosition.coerceAtLeast(0),
-                        durationMs = player.duration.coerceAtLeast(0),
+                        positionMs = (remote?.currentPosition ?: 0L).coerceAtLeast(0),
+                        durationMs = (remote?.duration ?: 0L).coerceAtLeast(0),
                     )
                 }
                 delay(1000)
@@ -957,9 +944,180 @@ class PlaybackController(
 
     fun release() {
         resolveJob?.cancel()
-        player.release()
+        controllerFuture?.cancel(true)
+        controllerFuture = null
+        _remotePlayer.value?.let { runCatching { it.release() } }
+        _remotePlayer.value = null
+        mediaController = null
+        PlaybackCrashGuard.clearAttempt(appContext)
     }
 
-    /** Current ExoPlayer audio session id — what an `Equalizer` etc must bind to. */
-    val audioSessionId: Int get() = player.audioSessionId
+    /** Current ExoPlayer audio session id — what an `Equalizer` etc must bind to.
+     *  远程播放器还没连上时是 UNSET（均衡器会等连上再绑）。 */
+    val audioSessionId: Int get() = player?.audioSessionId ?: C.AUDIO_SESSION_ID_UNSET
+
+    // MARK: - :playback 进程连接与死亡恢复（第十五轮）
+
+    /** 远程播放器的回调（MediaController.Listener）：只关心断开（:playback 死了）。 */
+    private val controllerListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            handlePlaybackProcessDeath(controller)
+        }
+    }
+
+    /** 连上 :playback 里的 MediaSession（MediaController.buildAsync）。连接是异步的：
+     *  刚启动要等一会儿；播放进程死后重建也要等一会儿。播歌前 awaitPlayer 会等它。
+     *  重复调用会取消旧的连接（连续死了两次时，旧 future 的回调会放掉旧控制器）。 */
+    private fun connectController() {
+        controllerFuture?.cancel(true)
+        controllerFuture = null
+        val token = SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java))
+        val future = MediaController.Builder(appContext, token)
+            .setListener(controllerListener)
+            .buildAsync()
+        controllerFuture = future
+        future.addListener({
+            // 已经被更新的连接取代了（连续死了两次）：放掉这个旧控制器。
+            if (future !== controllerFuture) {
+                runCatching { future.get() }.getOrNull()?.let { runCatching { it.release() } }
+                return@addListener
+            }
+            val controller = runCatching { future.get() }.getOrNull() ?: return@addListener
+            onControllerConnected(controller)
+        }, ContextCompat.getMainExecutor(appContext))
+    }
+
+    /** 远程播放器连上了：挂回调、把当前设置发给 :playback、注册音量回推、跑恢复动作。 */
+    private fun onControllerConnected(controller: MediaController) {
+        _remotePlayer.value = controller
+        mediaController = controller
+        controller.addListener(playerListener)
+        // 把当前设置发给 :playback（刚建好的播放器用的是默认值）。
+        sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, builtinGainEnabled)
+        sendPlaybackCommand(PlaybackService.CMD_SET_FORCE_SOFTWARE_DECODING, forceSoftwareDecoding)
+        applyAudioOffload()
+        registerLevelMessenger(controller)
+        // 播放进程死后重建：跑之前定好的恢复动作（换源 / 跳下一首 / 从头再播）。
+        val recovery = pendingRecovery
+        pendingRecovery = null
+        recovery?.invoke()
+    }
+
+    /** 给 :playback 发一个带开关值的自定义命令（增益 / 强制软件解码）。没连上就丢掉，
+     *  连上时会重发当前值（见 onControllerConnected）。 */
+    private fun sendPlaybackCommand(action: String, enabled: Boolean) {
+        val controller = mediaController ?: return
+        val args = Bundle().apply { putBoolean(PlaybackService.ARG_ENABLED, enabled) }
+        runCatching {
+            controller.sendCustomCommand(SessionCommand(action, Bundle.EMPTY), args)
+        }
+    }
+
+    /** 把主进程的音量 Messenger 注册给 :playback（AudioLevelProcessor 回推用）。 */
+    private fun registerLevelMessenger(controller: MediaController) {
+        val args = Bundle().apply { putParcelable(PlaybackService.ARG_MESSENGER, levelMessenger) }
+        runCatching {
+            controller.sendCustomCommand(
+                SessionCommand(PlaybackService.CMD_REGISTER_LEVEL_MESSENGER, Bundle.EMPTY),
+                args,
+            )
+        }
+    }
+
+    /** 等远程播放器连上（刚启动 / 播放进程死后重建要一点时间）。超时返回 null。 */
+    private suspend fun awaitPlayer(timeoutMs: Long = AWAIT_PLAYER_TIMEOUT_MS): Player? {
+        _remotePlayer.value?.let { return it }
+        return withTimeoutOrNull(timeoutMs) {
+            _remotePlayer.first { it != null }
+        }
+    }
+
+    /**
+     * :playback 进程死了（原生解码器 SIGSEGV 或系统杀进程）。主进程还活着：
+     * 记诊断、重启播放进程、按规则恢复（换源 / 跳下一首），App 不退桌面。
+     *
+     * 恢复规则：
+     * - 没在播（暂停 / 空闲 / 正在解析新歌）：只重建连接，不恢复——解析完会自己连上
+     *   新播放器播，用户暂停的歌不自动起播。
+     * - 内存杀死：同一首歌没问题，从头再播一遍。
+     * - 原生崩溃：同一首歌死一次就换源再试；两次都死（或已经换过源了还死）就跳下一首，
+     *   并拉黑 24 小时（启动自动恢复时跳过它）。
+     */
+    private fun handlePlaybackProcessDeath(deadController: MediaController) {
+        // 不是当前连着的控制器（已经重建过 / 正在释放）：忽略。
+        if (_remotePlayer.value !== deadController) {
+            runCatching { deadController.release() }
+            return
+        }
+        runCatching { deadController.release() }
+        _remotePlayer.value = null
+        mediaController = null
+        _audioLevel.value = 0f
+
+        val track = _state.value.currentTrack
+        val wasPlaying = _state.value.isPlaying
+        val attempt = PlaybackCrashGuard.readAttempt(appContext)
+        val song = track?.let { "${it.name} - ${it.singer}" } ?: attempt?.song ?: "未知"
+        // 尝试记录的地址只在它就是当前这首歌时才可信（解析中死了，记录还是上一首的）。
+        val url = attempt?.takeIf { it.trackId == track?.id }?.url ?: ""
+        val origin = attempt?.originLabel ?: _state.value.originLabel ?: "未知"
+
+        // 区分原生崩溃和内存杀死（API 30+ 才有退出原因；低版本 / 读不到一律按崩溃处理，
+        // 宁可多跳一首也不死循环）。
+        val exitReason = readPlaybackExitReason()
+        val isCrash = exitReason == null ||
+            exitReason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
+            exitReason == ApplicationExitInfo.REASON_CRASH
+        val reasonText = when {
+            exitReason == ApplicationExitInfo.REASON_LOW_MEMORY -> "系统内存不足杀死播放进程"
+            isCrash -> "原生崩溃（SIGSEGV，解码器）"
+            else -> "播放进程异常退出（原因 $exitReason）"
+        }
+        CrashDiagnostics.recordPlaybackProcessDeath(appContext, song, url, origin, reasonText)
+        android.util.Log.w("PlaybackController", "playback process died: $song ($reasonText)")
+
+        // 正在播的那首歌的“尝试记录”清掉（恢复逻辑会重新写）。
+        PlaybackCrashGuard.clearAttempt(appContext)
+
+        // 没在播 / 正在解析新歌：只重建连接，不恢复。
+        if (track == null || !wasPlaying || _state.value.resolving) {
+            connectController()
+            return
+        }
+
+        if (!isCrash) {
+            // 内存杀死：同一首歌没问题，从头再播一遍。
+            val index = _state.value.index
+            pendingRecovery = { playAt(index) }
+            connectController()
+            return
+        }
+
+        // 原生崩溃：同一首歌死了，换源再试一次；两次都死就跳下一首并拉黑 24 小时。
+        val trackId = track.id
+        val deaths = (playbackDeathsByTrack[trackId] ?: 0) + 1
+        playbackDeathsByTrack[trackId] = deaths
+        if (deaths >= MAX_DEATHS_PER_TRACK || crossSourceTriedFor == trackId) {
+            PlaybackCrashGuard.markCrashed(appContext, trackId, song)
+            pendingRecovery = { failAndAdvance("播放进程连续崩溃，已跳过") }
+        } else {
+            pendingRecovery = { tryCrossSourceOrAdvance(track, "播放进程崩溃") }
+        }
+        connectController()
+    }
+
+    /** 读 :playback 进程最近一次的退出原因（API 30+）。返回 null 表示读不到（低版本 /
+     *  无记录 / 记录太旧），调用方按崩溃处理。 */
+    private fun readPlaybackExitReason(): Int? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        return runCatching {
+            val am = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val reasons = am.getHistoricalProcessExitReasons(appContext.packageName, 0, 10)
+            val now = System.currentTimeMillis()
+            reasons.firstOrNull { info ->
+                info.processName?.endsWith(":playback") == true &&
+                    now - info.timestamp < 10_000L
+            }?.reason
+        }.getOrNull()
+    }
 }

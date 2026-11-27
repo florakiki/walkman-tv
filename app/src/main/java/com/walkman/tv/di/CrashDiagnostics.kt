@@ -138,6 +138,42 @@ object CrashDiagnostics {
         appendFailureEntry(context, entry)
     }
 
+    /**
+     * 留痕（2026-11-27 第十五轮）：解析出地址后、setMediaItem 之前记一条“正在播”，
+     * 把赢家地址（URL + 来源平台 + 歌名 + 档位）写进播放失败记录同一个文件、
+     * 同一个 20 条上限，设置页“查看诊断记录”本来就读它。播放进程原生闪退死后，
+     * 主进程靠这条知道它当时在播哪条地址，也能验证隔离到底生效没有（死了之后
+     * 这条还在、主进程还在）。调用方用 runCatching 包住，写盘失败绝不拦播放。
+     */
+    fun recordNowPlaying(context: Context, song: String, originLabel: String, quality: String, url: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[正在播] $time")
+            appendLine("歌曲：$song")
+            appendLine("来源：$originLabel")
+            appendLine("档位：$quality")
+            appendLine("地址：$url")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
+     * 记一条播放进程死亡（第十五轮）：原生解码器把 :playback 进程杀掉后，主进程
+     * 感知到、重启并换源 / 跳下一首时记在这里：哪首歌、哪个地址、几点、是原生崩溃
+     * 还是内存杀死。跟播放失败写同一个文件、同一个查看入口。
+     */
+    fun recordPlaybackProcessDeath(context: Context, song: String, url: String, originLabel: String, reason: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[播放进程死亡] $time")
+            appendLine("歌曲：$song")
+            appendLine("来源：$originLabel")
+            appendLine("地址：$url")
+            appendLine("原因：$reason")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
     /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
     private fun appendFailureEntry(context: Context, entry: String) {
         runCatching {

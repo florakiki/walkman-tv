@@ -109,6 +109,13 @@ android {
     kotlinOptions {
         jvmTarget = "17"
         freeCompilerArgs += ["-opt-in=kotlin.RequiresOptIn"]
+        // NextLib media3ext (FFmpeg) is compiled with Kotlin 2.2.0 metadata, but this
+        // project builds with Kotlin 1.9.24 (max metadata 2.0.0). Skip the metadata
+        // version check — the FFmpeg renderer is only loaded by reflection
+        // (DefaultRenderersFactory), never referenced directly in Kotlin code, so the
+        // compiler doesn't need to understand its metadata. Runtime stdlib is
+        // backward-compatible (1.9-compiled code runs fine on stdlib 2.2.10).
+        freeCompilerArgs += ["-Xskip-metadata-version-check"]
     }
 
     packagingOptions {
@@ -165,6 +172,13 @@ dependencies {
     implementation "androidx.media3:media3-exoplayer:1.10.1"
     implementation "androidx.media3:media3-session:1.10.1"
     implementation "androidx.media3:media3-ui:1.10.1"
+    // FFmpeg audio renderer, NextLib prebuilt (Media3 1.10.1 build, GPL-3.0):
+    // DefaultRenderersFactory loads FfmpegAudioRenderer by reflection when present, and
+    // EXTENSION_RENDERER_MODE_PREFER (already set in PlaybackService) puts it before the
+    // platform MediaCodec decoder — MP3/FLAC etc. decode in FFmpeg soft-dec first, platform
+    // decoder stays as fallback. Round 15: 让《找巢》这类平台解码器原生崩的歌能播出来，
+    // 不只是不闪退。代价：包体积涨（FFmpeg native lib 各 ABI 一份），见交付汇报。
+    implementation "io.github.anilbeesetti:nextlib-media3ext:1.10.1-0.13.0"
 
     // Image loading
     implementation "io.coil-kt:coil-compose:2.7.0"

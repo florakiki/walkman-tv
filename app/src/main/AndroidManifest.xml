@@ -49,8 +49,11 @@
         </intent-filter>
       </activity>
 
+      <!-- 第十五轮：播放器跑在这个 :playback 独立进程里。解码器原生闪退（SIGSEGV）
+           只杀这个进程，主进程还活着，能重启播放、换源、跳下一首，App 不退桌面。 -->
       <service
         android:name=".playback.PlaybackService"
+        android:process=":playback"
         android:exported="true"
         android:foregroundServiceType="mediaPlayback">
         <intent-filter>

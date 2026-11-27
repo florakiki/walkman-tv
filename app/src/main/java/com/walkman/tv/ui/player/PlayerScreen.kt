@@ -89,6 +89,8 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
   val controller = appContainer.playbackController
   val state by controller.state.collectAsState()
   val lyrics by controller.lyrics.collectAsState()
+  // 远程播放器（:playback 进程里）：连上才有，死了/重建时是 null，PlayerView 跟着换。
+  val remotePlayer by controller.playerFlow.collectAsState()
   val love by appContainer.libraryStore.love.collectAsState()
   val settings by appContainer.settingsStore.settings.collectAsState()
   val lyricSize = settings.lyricSize
@@ -172,7 +174,8 @@ fun PlayerScreen(onClose: () -> Unit, modifier: Modifier = Modifier) {
   if (state.isMv) {
     Box(modifier = modifier.fillMaxSize().background(AppColors.BgDeep)) {
       AndroidView(
-        factory = { ctx -> PlayerView(ctx).apply { player = controller.player; useController = true } },
+        factory = { ctx -> PlayerView(ctx).apply { useController = true } },
+        update = { view -> view.player = remotePlayer },
         modifier = Modifier.fillMaxSize(),
       )
       MvQueueDrawer(
