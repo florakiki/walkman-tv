@@ -631,16 +631,21 @@ private fun SearchTabRow(tab: SearchTab, onSelect: (SearchTab) -> Unit, firstTab
     }
 }
 
-/** 歌手卡片：圆形头像 + 名字 + 歌曲数 · 专辑数。 */
+/** 歌手卡片：圆形头像 + 名字 + 歌曲数 · 专辑数。
+ *  cardWidth / avatarSize / showStats 供首页歌手行用（8 个一排、头像小一点、不显示统计行）；
+ *  默认值就是原来那套，歌手浏览页不传参、样子不变。 */
 @Composable
 fun ArtistCard(
     artist: ArtistInfo,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    cardWidth: androidx.compose.ui.unit.Dp = 140.dp,
+    avatarSize: androidx.compose.ui.unit.Dp = 96.dp,
+    showStats: Boolean = true,
 ) {
     com.walkman.tv.ui.components.TvFocusable(
         onClick = onClick,
-        modifier = Modifier.width(140.dp).then(modifier),
+        modifier = Modifier.width(cardWidth).then(modifier),
     ) {
         Column(
             modifier = Modifier.padding(8.dp),
@@ -648,7 +653,7 @@ fun ArtistCard(
         ) {
             com.walkman.tv.ui.components.Artwork(
                 artist.picURL,
-                modifier = Modifier.size(96.dp),
+                modifier = Modifier.size(avatarSize),
                 shape = CircleShape,
             )
             Spacer(Modifier.height(8.dp))
@@ -665,7 +670,7 @@ fun ArtistCard(
                 artist.albumCount?.let { "${it} 张专辑" },
             ).joinToString(" · ")
             // 不显示平台来源：没有统计数时不写平台名，留空。
-            if (stats.isNotEmpty()) {
+            if (showStats && stats.isNotEmpty()) {
                 Text(
                     stats,
                     color = AppColors.TextMuted,

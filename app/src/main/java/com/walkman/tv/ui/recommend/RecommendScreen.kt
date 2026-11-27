@@ -209,15 +209,24 @@ private fun RecommendGrid(
     }
   }
 
-  Box(modifier = modifier) {
+  // 首屏纵向预算（第二十三轮）：网格视口高 = 屏高 − 顶栏，两排海报（含歌名/歌手名）
+  // 必须在一屏内完整露出来。海报边长按视口高自适应算，再被 5 列的列宽封顶；
+  // 窄屏（720p 电视）上海报会比原来小，这是两排都露出来的代价。
+  // 固定部分 438.dp = 上 padding 4 + 3 个区头 28×3 + 间距 10×6 + 歌手行 124
+  //   + 已播/收藏 50 + 行文字区 52×2 + 12 余量；两排海报各占 P，(视口高 − 438)/2。
+  androidx.compose.foundation.layout.BoxWithConstraints(modifier = modifier) {
+    val posterW = minOf(
+      (maxWidth - 8.dp - 14.dp * 4) / 5,
+      (maxHeight - 438.dp) / 2,
+    ).coerceAtLeast(96.dp)
     LazyVerticalGrid(
       columns = GridCells.Fixed(5),
       state = gridState,
       modifier = Modifier.fillMaxSize().focusGroup()
         .onFocusChanged { if (it.hasFocus) gridFocused = true },
-      contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp, bottom = 32.dp),
+      contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 4.dp, bottom = 32.dp),
       horizontalArrangement = Arrangement.spacedBy(14.dp),
-      verticalArrangement = Arrangement.spacedBy(16.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
       when {
         settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
@@ -237,17 +246,24 @@ private fun RecommendGrid(
                 browseSingers = true
               }
             }
+            // 歌手行：一排 8 个圆头像（Yang 2026-11-27 21:19 定，原来 6 个），头像 72.dp，
+            // 卡片宽按行宽算（8 张 + 7 个间距 + 两边 padding），不滚动；统计行不显示，
+            // 行高压到 114.dp 左右，别把下面挤下去。列表里不到 8 个时有几个放几个。
             item(span = { GridItemSpan(maxLineSpan) }) {
-              androidx.compose.foundation.lazy.LazyRow(
+              val singerCardWidth = (maxWidth - 8.dp - 14.dp * 7) / 8
+              Row(
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
               ) {
-                itemsIndexed(hotSingers, key = { _, it -> "${it.source.key}_${it.id}" }) { index, artist ->
+                hotSingers.take(8).forEach { artist ->
                   val singerKey = "singer_${artist.source.key}_${artist.id}"
                   com.walkman.tv.ui.search.ArtistCard(
                     artist = artist,
                     onClick = { artistFromBrowse = false; artistEntryKey = singerKey; openArtist = artist },
                     modifier = restore.modifierFor(singerKey),
+                    cardWidth = singerCardWidth,
+                    avatarSize = 72.dp,
+                    showStats = false,
                   )
                 }
               }
@@ -268,6 +284,7 @@ private fun RecommendGrid(
                 keyPrefix = "daily30",
                 restore = restore,
                 onPlay = { index -> playList(home.daily30, index); onOpenPlayer() },
+                cardWidth = posterW,
               )
             }
           }
@@ -284,6 +301,7 @@ private fun RecommendGrid(
                 keyPrefix = "guess",
                 restore = restore,
                 onPlay = { index -> playList(guessTracks, index); onOpenPlayer() },
+                cardWidth = posterW,
               )
             }
           }
@@ -366,7 +384,7 @@ private fun StatsRow(onNavigate: (NavSection) -> Unit) {
   val loved by appContainer.libraryStore.love.collectAsState()
   Row(
     horizontalArrangement = Arrangement.spacedBy(12.dp),
-    modifier = Modifier.fillMaxWidth().height(72.dp),
+    modifier = Modifier.fillMaxWidth().height(48.dp),
   ) {
     StatTile(
       label = "已播",
@@ -395,7 +413,7 @@ private fun StatTile(label: String, count: Int, picURL: String, modifier: Modifi
       modifier = Modifier.fillMaxSize().padding(start = 8.dp, end = 20.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
-      Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(50))) {
+      Box(modifier = Modifier.size(36.dp).clip(RoundedCornerShape(50))) {
         AsyncImage(
           model = picURL,
           contentDescription = null,
@@ -435,7 +453,7 @@ private fun SectionHeader(
     modifier = Modifier.fillMaxWidth().padding(start = 4.dp),
     verticalAlignment = Alignment.Bottom,
   ) {
-    Text(title, color = AppColors.TextPrimary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+    Text(title, color = AppColors.TextPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
     if (!subtitle.isNullOrBlank()) {
       Spacer(Modifier.width(10.dp))
       Text(
@@ -513,39 +531,40 @@ private fun com.walkman.tv.data.model.SourceID.tintColor(): Color = when (this) 
 /** 新区（每日30首 / 猜你喜欢）的横排歌曲卡片行：前 12 首，点卡片直接播整段队列。
  *  key 带前缀（daily30_ / guess_），和歌单卡片的 key 不撞；焦点登记进 restore 那张表，
  *  浮层关掉恢复 / 初始焦点都走它。
- *  每排 5 张铺满整行：卡片宽按行宽算（5 张 + 4 个间距 + 两边 padding），不是写死的
- *  168.dp——全宽之后写死宽度一排只占一半，看着稀。 */
+ *  卡片宽由调用方按首屏纵向预算算好传进来（不是写死的 168.dp，也不再是 5 列列宽）：
+ *  两排海报（含歌名/歌手名）要在一屏内完整露出来，海报边长按视口高自适应；歌名只
+ *  放一行，行高省出来给海报。 */
 @Composable
 private fun TrackCardRow(
   tracks: List<com.walkman.tv.data.model.Track>,
   keyPrefix: String,
   restore: com.walkman.tv.ui.components.OverlayFocusRestore,
   onPlay: (Int) -> Unit,
+  cardWidth: androidx.compose.ui.unit.Dp,
 ) {
-  androidx.compose.foundation.layout.BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-    val cardWidth = (maxWidth - 8.dp - 14.dp * 4) / 5
-    androidx.compose.foundation.lazy.LazyRow(
-      horizontalArrangement = Arrangement.spacedBy(14.dp),
-      contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-    ) {
-      itemsIndexed(tracks.take(12), key = { _, it -> "${keyPrefix}_${it.id}" }) { index, track ->
-        val cardKey = "${keyPrefix}_${track.id}"
-        Box(Modifier.width(cardWidth)) {
-          GridAlbumCard(
-            picURL = track.picURL,
-            title = track.name,
-            subtitle = track.singer,
-            fallbackTint = track.source.tintColor(),
-            modifier = restore.modifierFor(cardKey),
-            onClick = { onPlay(index) },
-          )
-        }
+  androidx.compose.foundation.lazy.LazyRow(
+    horizontalArrangement = Arrangement.spacedBy(14.dp),
+    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+  ) {
+    itemsIndexed(tracks.take(12), key = { _, it -> "${keyPrefix}_${it.id}" }) { index, track ->
+      val cardKey = "${keyPrefix}_${track.id}"
+      Box(Modifier.width(cardWidth)) {
+        GridAlbumCard(
+          picURL = track.picURL,
+          title = track.name,
+          subtitle = track.singer,
+          fallbackTint = track.source.tintColor(),
+          modifier = restore.modifierFor(cardKey),
+          onClick = { onPlay(index) },
+          titleMaxLines = 1,
+        )
       }
     }
   }
 }
 
-/** 首页卡片网格里的卡片：封面按格子宽度自适应（正方形），下面是标题 + 副标题。 */
+/** 首页卡片网格里的卡片：封面按格子宽度自适应（正方形），下面是标题 + 副标题。
+ *  titleMaxLines 默认 2 行（排行榜 / 推荐歌单网格）；首页两排海报行传 1，行高压一压。 */
 @Composable
 private fun GridAlbumCard(
   picURL: String?,
@@ -554,6 +573,7 @@ private fun GridAlbumCard(
   fallbackTint: Color,
   onClick: () -> Unit,
   modifier: Modifier = Modifier,
+  titleMaxLines: Int = 2,
 ) {
   Column(modifier = Modifier.fillMaxWidth()) {
     TvFocusable(
@@ -595,7 +615,7 @@ private fun GridAlbumCard(
       color = AppColors.TextPrimary,
       fontSize = 16.sp,
       fontWeight = FontWeight.SemiBold,
-      maxLines = 2,
+      maxLines = titleMaxLines,
       overflow = TextOverflow.Ellipsis,
     )
     if (!subtitle.isNullOrBlank()) {

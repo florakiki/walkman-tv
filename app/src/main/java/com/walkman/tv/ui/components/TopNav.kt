@@ -8,7 +8,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -73,7 +75,11 @@ fun TopNav(
     nowPlayingIsPlaying: Boolean = false,
     onOpenPlayer: () -> Unit = {},
 ) {
-    Box(modifier = modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp).focusGroup()) {
+    // 顶栏根容器：BoxWithConstraints 量一下可用宽度，给胶囊一个上限——
+    // 胶囊宽度不能超过 (可用宽 − 中间 6 个 tab 宽约 430.dp)/2，否则窄屏上会盖住 tab
+    // （第二十二轮的 bug：胶囊被进度条撑满整行，logo 和 tab 全被盖在下面）。
+    BoxWithConstraints(modifier = modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp).focusGroup()) {
+        val capsuleMaxW = ((maxWidth - 430.dp) / 2 - 8.dp).coerceAtLeast(190.dp)
         // Left: brand
         Brand(modifier = Modifier.align(Alignment.CenterStart))
 
@@ -101,7 +107,7 @@ fun TopNav(
                 title = nowPlayingTitle,
                 isPlaying = nowPlayingIsPlaying,
                 onClick = onOpenPlayer,
-                modifier = Modifier.align(Alignment.CenterEnd),
+                modifier = Modifier.align(Alignment.CenterEnd).widthIn(max = capsuleMaxW),
             )
         }
     }
@@ -269,7 +275,10 @@ private fun GlowCapsule(
             focusedBorder = androidx.tv.material3.Border(BorderStroke(2.dp, AppColors.AccentGreen), shape = capsuleShape),
         ),
     ) {
-        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp)) {
+        // 宽度取标题行内在宽度（IntrinsicSize.Max）：进度条 fillMaxWidth 只撑到标题行宽，
+        // 胶囊保持紧凑小件；不加这句时 fillMaxWidth 的进度条会把胶囊撑满整个顶栏宽度，
+        // 盖住 logo 和 tab（第二十二轮把进度条从定宽 230.dp 改成 fillMaxWidth 后出的回归）。
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp).width(IntrinsicSize.Max)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 // 跳动绿点：外圈光晕 + 实心点。
                 Box(
