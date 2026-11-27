@@ -37,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -322,8 +323,10 @@ fun TrackList(
     // 教训（2026-11-26，Yang 实测安泊猜想 9 首）：旧步进只试两次、每次等 80ms，慢电视上
     // 第 9 行还没组合好两次就试完了，焦点停在第 8 首到不了第 9 首；再按一下时按键没被吃掉，
     // 焦点被默认搜索送到浮层下面去了。新步进：滚过去后循环重试，直到行真正显示出来且焦点
-    // 落上去、或试满 12 次（约 0.9 秒）才放弃；中途行一直没显示就再滚一次；快速连按时旧
-    // 协程看到目标变了就自己停，不把焦点拽回旧行。
+    // 落上去才放弃；中途行一直没显示就再滚一次；快速连按时旧协程看到目标变了就自己停，
+    // 不把焦点拽回旧行。第十九轮：重试原来每次固定等 70ms 再复查，长按连按时每步都多等
+    // 70ms、翻起来一顿一顿；改成等一帧（withFrameNanos）再复查——列表布局完、行组合好、
+    // layoutInfo 更新就在下一帧，慢电视上一帧本身就长，等一帧自然就等够了。
     // 到头（第 0 行按上 / 最后一行按下）：trapFocus 时把按键吃掉、停在原地，绝不漏到列表外；
     // 非 trapFocus 保持原来的放行（顶层页面里焦点要能回到上面的 tab/行）。
     fun stepFocus(delta: Int): Boolean {
@@ -349,7 +352,7 @@ fun TrackList(
             stepTarget = target
             scope.launch {
                 runCatching { effectiveListState.scrollToItem(target + headerOffset) }
-                repeat(12) {
+                repeat(30) {
                     if (focusedIndex == target || stepTarget != target) return@launch
                     val nowVisible = effectiveListState.layoutInfo.visibleItemsInfo.any { it.index == target + headerOffset }
                     if (nowVisible) {
@@ -357,7 +360,7 @@ fun TrackList(
                     } else {
                         runCatching { effectiveListState.scrollToItem(target + headerOffset) }
                     }
-                    delay(70)
+                    withFrameNanos { }
                 }
                 runCatching { focuserFor(target).requestFocus() }
             }

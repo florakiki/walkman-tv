@@ -929,7 +929,9 @@ private fun CoverBackdrop(picURL: String?) {
       coil.compose.AsyncImage(
         model = coil.request.ImageRequest.Builder(context)
           .data(picURL)
-          .transformations(com.walkman.tv.ui.components.BlurTransformation(context, radius = 25f, sampling = 2f))
+          // 第十九轮：采样 2f → 4f——背景本来就是重度模糊，4 倍降采样肉眼看不出
+          // 区别，RenderScript 模糊的像素量减到约 1/4，每换一首歌少卡一下。
+          .transformations(com.walkman.tv.ui.components.BlurTransformation(context, radius = 25f, sampling = 4f))
           .crossfade(400)
           .build(),
         contentDescription = null,

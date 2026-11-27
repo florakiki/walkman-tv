@@ -140,10 +140,13 @@ fun Waveform(
                 return (midY + sample * ampPx * env).toFloat()
             }
             path.moveTo(0f, yAt(0.0))
+            // 第十九轮：采样步长 2px → 4px——波形是平滑正弦叠加，4px 采样肉眼看不出
+            // 区别，三角函数计算量减半；这条波形播歌时每帧都在重画，省下来的主线程
+            // 时间正好让给翻列表、移焦点。
             var x = 0.0
             while (x <= width) {
                 path.lineTo(x.toFloat(), yAt(x))
-                x += 2.0
+                x += 4.0
             }
             drawPath(
                 path = path,
