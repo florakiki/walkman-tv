@@ -261,12 +261,12 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         }
 
         Section("内置音量") {
-            ToggleRow("内置增益（声音偏小时开启，约 +6dB）", settings.builtinGainEnabled) {
+            ToggleRow("内置增益（声音偏小时开启，约 +3dB）", settings.builtinGainEnabled) {
                 scope.launch { appContainer.settingsStore.update { it.copy(builtinGainEnabled = !it.builtinGainEnabled) } }
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                "在 App 内把音量再放大一级（约 +6dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
+                "在 App 内把音量再放大一级（约 +3dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )

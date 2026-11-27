@@ -319,7 +319,7 @@ class PlaybackService : MediaSessionService() {
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .setAudioProcessorChain(
                         // Order matters: level meter first (measures pre-gain),
-                        // gain second (soft-limited +6 dB, see GainAudioProcessor).
+                        // gain second (soft-limited +3 dB, see GainAudioProcessor).
                         DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor, gainProcessor),
                     )
                     .build()

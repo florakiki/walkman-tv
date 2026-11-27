@@ -118,7 +118,7 @@ fun MobileSettingsScreen(modifier: Modifier = Modifier) {
         }
 
         SettingSection("音频") {
-            SwitchRow("内置增益（声音偏小时开启，约 +6dB）", settings.builtinGainEnabled) {
+            SwitchRow("内置增益（声音偏小时开启，约 +3dB）", settings.builtinGainEnabled) {
                 scope.launch { appContainer.settingsStore.update { it.copy(builtinGainEnabled = !it.builtinGainEnabled) } }
             }
             SwitchRow("Hi-Res 硬件直通（播放无损闪退时请关闭）", settings.audioOffloadEnabled) {

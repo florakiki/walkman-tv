@@ -10,7 +10,7 @@ import kotlin.math.tanh
 
 /**
  * Media3 [androidx.media3.common.audio.AudioProcessor] that adds a fixed built-in gain
- * (~+6 dB) to the PCM stream.
+ * (~+3 dB) to the PCM stream.
  *
  * Curve (2026-11-26, 替代原来的全程 tanh 软限幅)：线性增益 + 只在接近满幅处才接管的
  * 软顶 —— 输入 |x·gain| ≤ 0.85 时输出就是 x·gain（一点压缩、一点谐波都没有），超过
@@ -25,10 +25,22 @@ import kotlin.math.tanh
  *   Yang 报的“同一首歌里忽大忽小、一会儿好听一会儿发闷/发糊”，不需要任何开关状态
  *   来回切就能出现；代码里除音频焦点（已关）外也没有别的增益重置路径（播放器每进程
  *   只建一次、开关只响应用户点按、offload 默认关、没有 setVolume 调用）。
- *   新曲线：峰值 ≤0.43 的输入 THD 0%、有效增益恒定 +6.00 dB；0.5 峰值 THD 1.3%
+ *   当时新曲线（+6 dB）：峰值 ≤0.43 的输入 THD 0%、有效增益恒定 +6.00 dB；0.5 峰值 THD 1.3%
  *   （旧 6.7%）；同一首母带歌 RMS +4.75 dB。满幅附近的瞬态峰仍要限幅（+6 dB 推
  *   -1 dBFS 的母带，峰顶不做处理物理上就不可能不超满幅），但限幅只发生在瞬态峰顶，
  *   不再压整段响的段落。
+ * 2026-11-27（+6 dB → +3 dB）：Yang 报“内置音量听会大小声”。实测（Python，同一
+ *   套公式）证明 +6 dB 下膝点仍压整段响的段落，不是只压瞬态
+ *   峰顶——0.89 峰值正弦 68% 采样在肩部、THD 20.0%；母带歌副歌
+ *   （峰值 0.89）28% 采样在肩部，RMS 增益只有 +4.40 dB，而安静主歌
+ *   拿满 +6.00 dB——段落间增益差 1.6 dB，响的段被压、轻的段被
+ *   提，听感就是忽大忽小；膝点抬到 0.95 也没用（副歌还是
+ *   +4.45 dB），硬限幅更差——+6 dB 推近满幅的母带，5 dB 的峰顶
+ *   压缩是物理上躲不掉的。降到 +3 dB：主歌 +3.00 dB、副歌 +2.48 dB，
+ *   段落间只差 0.5 dB（听不出起伏）；峰值 ≤0.60 的输入 THD 0%、
+ *   增益恒定 +3.00 dB；0.89 峰值 THD 8.9%（原来 20.0%）。曲线形状不变
+ *   （膝点仍是输出 0.85），只是固定增益从 ×1.9953 降到 ×1.4125——
+ *   要的是音量稳，不是再响 3 dB。
  * 注意 tanh 本身不吃高频（各频段能量比实测都在 2.4–3.0 倍之间，没有频段被切掉）：
  * “发闷（高频没了）”另有来源——解析到的实际档位低于请求档位时角标仍显示请求档位，
  * 见 PlaybackController 的探头校正 + CrashDiagnostics 的音质记录。
@@ -50,9 +62,9 @@ import kotlin.math.tanh
  */
 class GainAudioProcessor : BaseAudioProcessor() {
 
-    /** +6 dB ≈ ×1.995. Plain var now: the gain is a fixed multiplier — the old
+    /** +3 dB ≈ ×1.4125. Plain var now: the gain is a fixed multiplier — the old
      *  tanh-normalisation factor is gone with the old curve (see [limitGain]). */
-    var gain: Float = GAIN_DB_6
+    var gain: Float = GAIN_DB_3
 
     /** Off ⇒ pure pass-through (bytes copied unchanged). */
     @Volatile var enabled: Boolean = true
@@ -181,7 +193,7 @@ class GainAudioProcessor : BaseAudioProcessor() {
     }
 
     private companion object {
-        const val GAIN_DB_6 = 1.9953f // 10^(6/20)
+        const val GAIN_DB_3 = 1.4125f // 10^(3/20)
         /** Output level where the soft ceiling starts: |x·gain| ≤ 0.85 is pure linear gain. */
         const val KNEE = 0.85
         const val INT24_MAX = 8388607 // 2^23 - 1
