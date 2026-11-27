@@ -247,6 +247,12 @@ class PlaybackController(
 
         /** 等远程播放器连上最多等多久（playResolvedOrFail 里 awaitPlayer 用）。 */
         const val AWAIT_PLAYER_TIMEOUT_MS = 5_000L
+
+        /** 解析地址总超时（兜底，第十七轮）：脚本线程卡死、源太慢等任何原因
+         *  导致解析一直不返回时，90 秒就当失败，不让 UI 永远卡在
+         *  “正在获取播放地址…”。正常解析几秒就完，慢的也就几十秒，
+         *  90 秒不会误伤正常解析。 */
+        const val RESOLVE_TIMEOUT_MS = 90_000L
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -469,7 +475,13 @@ class PlaybackController(
             } else if (cached != null) {
                 Result.success(cached)
             } else {
-                runCatching { sources.resolveMusicURL(track, effectivePreferred) }
+                // 第十七轮：解析总超时（兜底）。JsScriptRuntime 的 25 秒超时只包着
+                // deferred.await()，JS 线程卡死时 withContext(jsDispatcher) 会永远等下去、
+                // 解析永远不完成也不失败，UI 一直卡在“正在获取播放地址…”。
+                // 90 秒还没回就当失败，走正常失败流程（记诊断、静默跳下一首）。
+                withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+                    runCatching { sources.resolveMusicURL(track, effectivePreferred) }
+                } ?: Result.failure(SourceManager.SourceException("解析超时（${RESOLVE_TIMEOUT_MS / 1000} 秒无应答）"))
             }
             // playResolvedOrFail 是 suspend（关口验地址要等网络），不能包在 runCatching 里
             // （它的 lambda 不是 suspend 上下文），改 try/catch。
@@ -735,7 +747,10 @@ class PlaybackController(
         }
         val trackId = track.id
         scope.launch {
-            val res = runCatching { sources.resolveOtherSource(track, preferredQuality) }.getOrNull()
+            // 第十七轮：同上，播时换源的解析也要总超时兜底，超时当失败、走原有失败流程。
+            val res = withTimeoutOrNull(RESOLVE_TIMEOUT_MS) {
+                runCatching { sources.resolveOtherSource(track, preferredQuality) }.getOrNull()
+            }
             // 用户切歌了就丢弃换好的地址，别塞给新歌。
             if (_state.value.currentTrack?.id != trackId) return@launch
             if (res != null) {
@@ -1050,6 +1065,9 @@ class PlaybackController(
         _remotePlayer.value = controller
         mediaController = controller
         consecutiveDeaths = 0
+        // 第十七轮：连上就记一条。诊断里没有 [播放器已连接] 就说明主进程根本
+        // 没连上 :playback——这是第十六轮后“全部不能听”排查时缺的那条证据。
+        runCatching { CrashDiagnostics.recordPlaybackConnected(appContext) }
         controller.addListener(playerListener)
         // 把当前设置发给 :playback（刚建好的播放器用的是默认值）。
         sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, builtinGainEnabled)

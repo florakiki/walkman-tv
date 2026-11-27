@@ -46,16 +46,26 @@ class SourceManager(
     class SourceException(message: String, val attemptedSources: List<String> = emptyList()) : Exception(message)
 
     suspend fun load(script: UserScript): Result<ScriptCapabilities> {
-        return try {
-            val runtime = JsScriptRuntime(script, preload, http)
-            val caps = runtime.load()
-            _loaded.value = _loaded.value.filter { it.script.id != script.id } +
-                LoadedScript(script, runtime, caps)
-            Result.success(caps)
-        } catch (e: Exception) {
-            Log.e(TAG, "load failed: ${e.message}")
-            Result.failure(e)
+        var lastError: Exception? = null
+        // 第十七轮：JS 线程卡死时 runtime.load() 会超时失败（15 秒 evaluate 超时）。
+        // 换一个全新 runtime（新线程）重试一次——新线程不受旧线程卡死的影响。
+        for (attempt in 0 until 2) {
+            try {
+                val runtime = JsScriptRuntime(script, preload, http)
+                val caps = runtime.load()
+                _loaded.value = _loaded.value.filter { it.script.id != script.id } +
+                    LoadedScript(script, runtime, caps)
+                return Result.success(caps)
+            } catch (e: Exception) {
+                Log.e(TAG, "load failed (attempt ${attempt + 1}): ${e.message}")
+                lastError = e
+                val jsThreadTimeout = e is JsScriptRuntime.ScriptException &&
+                    (e.message?.contains("JS 线程无响应") == true ||
+                        e.message?.contains("脚本线程无响应") == true)
+                if (!jsThreadTimeout) break
+            }
         }
+        return Result.failure(lastError ?: JsScriptRuntime.ScriptException("脚本加载失败"))
     }
 
     fun unload(scriptId: String) {
@@ -175,6 +185,23 @@ class SourceManager(
         val info = JSONObject()
             .put("type", quality.key)
             .put("musicInfo", makeOldMusicInfo(track))
+        try {
+            return resolveViaScriptOnce(track, ls, info)
+        } catch (e: JsScriptRuntime.ScriptTimeoutException) {
+            // 第十七轮：脚本线程无响应（JS 线程卡死）——旧 runtime 的线程已经死了，
+            // 换一个全新 runtime（新线程）重试一次。旧 runtime 的线程留在那儿
+            // （卡死的线程关不掉），只泄漏一个空闲线程，比整首歌卡死强。
+            if (e.message?.contains("脚本线程无响应") != true) throw e
+            Log.w(TAG, "JS thread unresponsive, reloading script ${ls.script.name} and retrying once")
+            val reloaded = load(ls.script).isSuccess
+            if (!reloaded) throw e
+            val newLs = scriptFor(track.source, "musicUrl") ?: throw e
+            if (newLs === ls) throw e
+            return resolveViaScriptOnce(track, newLs, info)
+        }
+    }
+
+    private suspend fun resolveViaScriptOnce(track: Track, ls: LoadedScript, info: JSONObject): String {
         val result = ls.runtime.requestAction(track.source, "musicUrl", info)
         val obj = result as? JSONObject
         val url = obj?.optJSONObject("data")?.optString("url")?.ifEmpty { null }

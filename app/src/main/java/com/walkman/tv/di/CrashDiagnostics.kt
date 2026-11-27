@@ -202,6 +202,34 @@ object CrashDiagnostics {
         appendFailureEntry(context, entry)
     }
 
+    /**
+     * 记主进程的 MediaController 连上了 :playback 的 MediaSession（第十七轮）。
+     * 诊断里没有这条就说明主进程根本没连上播放器服务——第十六轮后
+     * “全部不能听”排查时缺的就是这条证据。
+     */
+    fun recordPlaybackConnected(context: Context) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[播放器已连接] $time")
+            appendLine("详情：主进程已连上 :playback 的 MediaSession")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
+     * 记启动时音源脚本加载情况（第十七轮）：已加载几个、叫什么。
+     * 解析卡住时靠这条判断是不是根本没脚本可用（0 个就是脚本没加载上）。
+     */
+    fun recordScriptStatus(context: Context, names: List<String>) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[音源] $time")
+            appendLine("已加载：${names.size} 个")
+            appendLine("名称：${if (names.isEmpty()) "无" else names.joinToString("、")}")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
     /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
     private fun appendFailureEntry(context: Context, entry: String) {
         runCatching {

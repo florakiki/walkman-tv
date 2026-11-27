@@ -349,6 +349,12 @@ class AppContainer(val appContext: Context) {
                 downloadCoordinator.setMaxConcurrent(s.maxConcurrentDownloads)
             }.launchIn(appScope)
             scriptStore.loadAll()
+            // 第十七轮：记音源加载情况。解析卡住时靠这条判断是不是根本没脚本可用
+            // （0 个就是脚本没加载上）；写盘失败不影响启动。
+            runCatching {
+                val names = sourceManager.loaded.value.map { it.script.name }
+                CrashDiagnostics.recordScriptStatus(appContext, names)
+            }
             searchHistoryStore.load()
             coverCache.loadAll()
             downloadStore.loadAll()

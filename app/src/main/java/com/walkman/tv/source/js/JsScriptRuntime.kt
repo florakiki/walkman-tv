@@ -17,6 +17,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -57,29 +58,38 @@ class JsScriptRuntime(
     suspend fun load(timeoutMs: Long = 10_000): ScriptCapabilities {
         val deferred = CompletableDeferred<ScriptCapabilities>()
         initDeferred = deferred
-        withContext(jsDispatcher) {
-            val c = QuickJSContext.create()
-            ctx = c
-            c.setConsole(object : QuickJSContext.Console {
-                override fun log(info: String?) { Log.d(TAG, info ?: "") }
-                override fun info(info: String?) { Log.i(TAG, info ?: "") }
-                override fun warn(info: String?) { Log.w(TAG, info ?: "") }
-                override fun error(info: String?) { Log.e(TAG, info ?: "") }
-            })
-            installGlobals(c)
-            c.evaluate(preload)
-            c.globalObject.getJSFunction("lx_setup").call(
-                key, script.id, script.name, script.description,
-                script.version, script.author, script.homepage, script.rawScript,
-            )
-            // v4 source is an IIFE — evaluate directly (mirrors QuickJS.java loadScript).
-            try {
-                c.evaluate(script.rawScript)
-            } catch (e: Exception) {
-                // A throw after a successful init is non-fatal; otherwise fail init.
-                if (!inited) failInit(e.message ?: "脚本执行错误")
+        try {
+            // 第十七轮：evaluate 也要限时。JS 线程卡死时 withContext 会永远等下去，
+            // 后面的 10 秒超时根本跑不到（它只包着 deferred.await()），
+            // 启动时 bootstrap 会一直挂在 loadAll() 里、脚本永远加载不上。
+            withTimeout(LOAD_EVAL_TIMEOUT_MS) {
+                withContext(jsDispatcher) {
+                    val c = QuickJSContext.create()
+                    ctx = c
+                    c.setConsole(object : QuickJSContext.Console {
+                        override fun log(info: String?) { Log.d(TAG, info ?: "") }
+                        override fun info(info: String?) { Log.i(TAG, info ?: "") }
+                        override fun warn(info: String?) { Log.w(TAG, info ?: "") }
+                        override fun error(info: String?) { Log.e(TAG, info ?: "") }
+                    })
+                    installGlobals(c)
+                    c.evaluate(preload)
+                    c.globalObject.getJSFunction("lx_setup").call(
+                        key, script.id, script.name, script.description,
+                        script.version, script.author, script.homepage, script.rawScript,
+                    )
+                    // v4 source is an IIFE — evaluate directly (mirrors QuickJS.java loadScript).
+                    try {
+                        c.evaluate(script.rawScript)
+                    } catch (e: Exception) {
+                        // A throw after a successful init is non-fatal; otherwise fail init.
+                        if (!inited) failInit(e.message ?: "脚本执行错误")
+                    }
+                    Unit // force lambda return type to Unit; avoids if-without-else type-check error
+                }
             }
-            Unit // force lambda return type to Unit; avoids if-without-else type-check error
+        } catch (e: TimeoutCancellationException) {
+            throw ScriptException("脚本加载超时（JS 线程无响应）")
         }
         return try {
             withTimeout(timeoutMs) { deferred.await() }
@@ -99,7 +109,18 @@ class JsScriptRuntime(
             .put("action", action)
             .put("info", info)
         val payload = JSONObject().put("requestKey", requestKey).put("data", data)
-        withContext(jsDispatcher) { sendToScript("request", payload.toString()) }
+        // 第十七轮：发给脚本这一步也要限时。JS 线程卡死时 withContext(jsDispatcher)
+        // 会永远等下去，后面的 25 秒超时根本跑不到（它只包着 deferred.await()），
+        // 解析就永远不完成也不失败，UI 一直卡在“正在获取播放地址…”。
+        // 5 秒还没接手就当脚本线程死了，调用方（SourceManager）会换一个新 runtime 重试。
+        val sent = withTimeoutOrNull(DISPATCH_TIMEOUT_MS) {
+            withContext(jsDispatcher) { sendToScript("request", payload.toString()) }
+            true
+        }
+        if (sent != true) {
+            pending.remove(requestKey)
+            throw ScriptTimeoutException("脚本线程无响应")
+        }
         return try {
             withTimeout(timeoutMs) { deferred.await() }
         } catch (e: TimeoutCancellationException) {
@@ -278,5 +299,13 @@ class JsScriptRuntime(
 
     companion object {
         private const val TAG = "JsScriptRuntime"
+        // 第十七轮：这两个超时包的是“把任务发到 JS 线程”这一步本身。
+        // 25 秒/10 秒超时只包着 deferred.await()（等脚本回信），
+        // JS 线程卡死时 withContext(jsDispatcher) 会永远等下去、后面的超时根本跑不到，
+        // 解析就永远不完成也不失败，UI 一直卡在“正在获取播放地址…”。
+        /** 发给脚本的任务 5 秒还没被 JS 线程接手 → 当脚本线程死了。 */
+        const val DISPATCH_TIMEOUT_MS = 5_000L
+        /** 加载脚本（evaluate preload + lx_setup + 脚本）15 秒没跑完 → 当 JS 线程死了。 */
+        const val LOAD_EVAL_TIMEOUT_MS = 15_000L
     }
 }
