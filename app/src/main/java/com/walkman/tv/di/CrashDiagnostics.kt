@@ -27,6 +27,10 @@ object CrashDiagnostics {
     private const val MAX_STACK_LINES = 80
     private const val MAX_FAILURE_ENTRIES = 20
 
+    /** 记上次启动时的包安装时间（新包第一次启动清旧记录用）。 */
+    private const val PREFS_NAME = "crash-diagnostics"
+    private const val KEY_LAST_UPDATE_TIME = "lastUpdateTime"
+
     /** 当前在哪个页面（RootScreen 的 section / 播放页 / 退出框）。 */
     @Volatile
     var currentScreen: String = "启动中"
@@ -66,6 +70,8 @@ object CrashDiagnostics {
         if (installed) return
         installed = true
         val appContext = context.applicationContext
+        // 新包第一次启动：清掉上一版的旧诊断记录（见 maybeClearStaleRecords）。
+        maybeClearStaleRecords(appContext)
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching { writeReport(appContext, thread, throwable) }
@@ -158,17 +164,49 @@ object CrashDiagnostics {
     }
 
     /**
+     * 新包第一次启动时清掉旧诊断记录（第十八轮）：重装同包名 APK 不清应用数据，
+     * 上一版的 [播放进程死亡] / [播放失败] 一直留着，跟新版的混在一起没法一眼
+     * 分清是哪一版的。versionName 每轮都是 1.0.0-debug，分不出轮次，用包的
+     * lastUpdateTime（装新包就变）判断：跟上次记的不一样就是刚装了新包，清掉。
+     * 只清一次（清完把新的 lastUpdateTime 记下来，下次启动就不清了）。
+     */
+    fun maybeClearStaleRecords(context: Context) {
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            val lastUpdate = info.lastUpdateTime
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val stored = prefs.getLong(KEY_LAST_UPDATE_TIME, -1L)
+            if (stored != -1L && stored != lastUpdate) {
+                clearReport(context)
+            }
+            if (stored != lastUpdate) {
+                prefs.edit().putLong(KEY_LAST_UPDATE_TIME, lastUpdate).apply()
+            }
+        }
+    }
+
+    /**
      * 记一条播放进程死亡（第十五轮）：原生解码器把 :playback 进程杀掉后，主进程
      * 感知到、重启并换源 / 跳下一首时记在这里：哪首歌、哪个地址、几点、是原生崩溃
      * 还是内存杀死。跟播放失败写同一个文件、同一个查看入口。
+     * [decoder]（第十八轮）：当时在用的解码器（"ffmpeg" / "c2.android.*" 等），
+     * 有就多写一行，下次诊断直接看到是哪条解码器在崩。
      */
-    fun recordPlaybackProcessDeath(context: Context, song: String, url: String, originLabel: String, reason: String) {
+    fun recordPlaybackProcessDeath(
+        context: Context,
+        song: String,
+        url: String,
+        originLabel: String,
+        reason: String,
+        decoder: String? = null,
+    ) {
         val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
         val entry = buildString {
             appendLine("[播放进程死亡] $time")
             appendLine("歌曲：$song")
             appendLine("来源：$originLabel")
             appendLine("地址：$url")
+            if (decoder != null) appendLine("解码器：$decoder")
             appendLine("原因：$reason")
         }.trimEnd()
         appendFailureEntry(context, entry)

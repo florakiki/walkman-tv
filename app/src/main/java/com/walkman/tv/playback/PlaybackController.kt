@@ -167,6 +167,13 @@ class PlaybackController(
     /** :playback 连接（MediaController.buildAsync 的 future；重建时取消旧的）。 */
     private var controllerFuture: ListenableFuture<MediaController>? = null
 
+    /** 当前这次连接尝试是什么时候发起的（防 future 永远挂起：超时就取消重连）。 */
+    private var connectionAttemptStartedMs = 0L
+
+    /** 累计连接失败次数 + 最后一次失败原因（诊断用；连上后清掉）。 */
+    private var connectFailures = 0
+    private var lastConnectError: String? = null
+
     /** 当前连着的 MediaController（发自定义命令用；Player 接口上没有 sendCustomCommand）。
      *  跟 _remotePlayer 同步：连上时设、死了 / 释放时清。 */
     private var mediaController: MediaController? = null
@@ -247,6 +254,14 @@ class PlaybackController(
 
         /** 等远程播放器连上最多等多久（playResolvedOrFail 里 awaitPlayer 用）。 */
         const val AWAIT_PLAYER_TIMEOUT_MS = 5_000L
+
+        /** 一次连接尝试超过多久没完成就当卡住了（buildAsync 的 future 永远不回）：
+         *  取消掉重连。8 秒：电视冷启动连服务一般 1–3 秒，8 秒还没回就是卡住了。 */
+        const val CONNECT_ATTEMPT_TIMEOUT_MS = 8_000L
+
+        /** 解码器记录多新鲜才可信（:playback 里解码器初始化时写；死的时候读它。
+         *  10 分钟：一首歌一般 3–5 分钟，超过这个数就是上一首的残留，不采信）。 */
+        const val DECODER_FRESH_MS = 10 * 60 * 1000L
 
         /** 解析地址总超时（兜底，第十七轮）：脚本线程卡死、源太慢等任何原因
          *  导致解析一直不返回时，90 秒就当失败，不让 UI 永远卡在
@@ -565,8 +580,10 @@ class PlaybackController(
             // next track gets a fresh budget.
             networkRetryCount = 0
             // 等远程播放器连上（刚启动 / 播放进程死后重建要一点时间）；连不上就当这首失败。
+            // 第十八轮：失败原因里带上连接失败的次数和最后一次原因，诊断里一眼能看到
+            // 是连不上、还是连上又断了。
             val remote = awaitPlayer() ?: run {
-                failAndAdvance("播放进程未连接", r.attemptedSources)
+                failAndAdvance("播放进程未连接${connectionFailureSummary()}", r.attemptedSources)
                 return
             }
             // 留痕（第十五轮）：解析出地址后、setMediaItem 之前，把赢家地址写进诊断
@@ -1004,6 +1021,23 @@ class PlaybackController(
                         backoffMs = (backoffMs * 2).coerceAtMost(10_000L)
                         continue
                     }
+                    // 第十八轮：连接 future 挂起太久（buildAsync 永远不回）时，循环以前
+                    // 只会每秒看一次、永远等下去，播歌每次都 5 秒超时失败。现在超时就
+                    // 取消掉、记一次失败、马上重连，不让连接永久卡住。
+                    val stuckMs = System.currentTimeMillis() - connectionAttemptStartedMs
+                    if (connectionAttemptStartedMs > 0L && stuckMs > CONNECT_ATTEMPT_TIMEOUT_MS) {
+                        runCatching { controllerFuture?.cancel(true) }
+                        controllerFuture = null
+                        connectFailures++
+                        lastConnectError = "连接超时（${CONNECT_ATTEMPT_TIMEOUT_MS / 1000} 秒未完成）"
+                        android.util.Log.w(
+                            "PlaybackController",
+                            "MediaController connect stuck, cancelling and retrying (#$connectFailures)",
+                        )
+                        runCatching { connectController() }
+                        backoffMs = 500L
+                        continue
+                    }
                 } else {
                     backoffMs = 500L
                 }
@@ -1049,13 +1083,27 @@ class PlaybackController(
             .setListener(controllerListener)
             .buildAsync()
         controllerFuture = future
+        connectionAttemptStartedMs = System.currentTimeMillis()
         future.addListener({
             // 已经被更新的连接取代了（连续死了两次）：放掉这个旧控制器。
             if (future !== controllerFuture) {
                 runCatching { future.get() }.getOrNull()?.let { runCatching { it.release() } }
                 return@addListener
             }
-            val controller = runCatching { future.get() }.getOrNull() ?: return@addListener
+            // 第十八轮：连接失败以前是静默丢掉（get() 抛错就直接 return），诊断里
+            // 什么都不留，只剩一句“播放进程未连接”。现在把失败次数和原因记下来，
+            // 播歌失败时写进诊断记录。
+            val controller = try {
+                future.get()
+            } catch (e: Exception) {
+                connectFailures++
+                lastConnectError = e.javaClass.simpleName + ": " + (e.message ?: "")
+                android.util.Log.w(
+                    "PlaybackController",
+                    "MediaController connect failed (#$connectFailures): $lastConnectError",
+                )
+                return@addListener
+            }
             onControllerConnected(controller)
         }, ContextCompat.getMainExecutor(appContext))
     }
@@ -1065,6 +1113,9 @@ class PlaybackController(
         _remotePlayer.value = controller
         mediaController = controller
         consecutiveDeaths = 0
+        // 第十八轮：连上了，之前累计的连接失败清掉（下次再失败重新数）。
+        connectFailures = 0
+        lastConnectError = null
         // 第十七轮：连上就记一条。诊断里没有 [播放器已连接] 就说明主进程根本
         // 没连上 :playback——这是第十六轮后“全部不能听”排查时缺的那条证据。
         runCatching { CrashDiagnostics.recordPlaybackConnected(appContext) }
@@ -1110,6 +1161,13 @@ class PlaybackController(
         }
     }
 
+    /** 连接失败的摘要（诊断用）："（连接失败 3 次，最后：IllegalStateException: …）"，没失败过就是空串。 */
+    private fun connectionFailureSummary(): String {
+        if (connectFailures <= 0) return ""
+        val last = lastConnectError?.let { "，最后：$it" } ?: ""
+        return "（连接失败 $connectFailures 次$last）"
+    }
+
     /**
      * :playback 进程死了（原生解码器 SIGSEGV 或系统杀进程）。主进程还活着：
      * 记诊断、重启播放进程、按规则恢复（换源 / 跳下一首），App 不退桌面。
@@ -1151,7 +1209,13 @@ class PlaybackController(
             isCrash -> "原生崩溃（SIGSEGV，解码器）"
             else -> "播放进程异常退出（原因 $exitReason）"
         }
-        CrashDiagnostics.recordPlaybackProcessDeath(appContext, song, url, origin, reasonText)
+        // 第十八轮：把当时在用的解码器也记上（:playback 里解码器初始化时写的，
+        // 只采信 10 分钟内的新鲜记录），下次诊断直接看到是 FFmpeg 还是平台解码器在崩。
+        val decoder = runCatching { PlaybackCrashGuard.readDecoder(appContext) }
+            .getOrNull()
+            ?.takeIf { System.currentTimeMillis() - it.atMs < DECODER_FRESH_MS }
+            ?.decoder
+        CrashDiagnostics.recordPlaybackProcessDeath(appContext, song, url, origin, reasonText, decoder)
         android.util.Log.w("PlaybackController", "playback process died: $song ($reasonText)")
 
         // 连续死亡计数（重连退避用）：10 秒内又死一次就 +1，否则重新算。

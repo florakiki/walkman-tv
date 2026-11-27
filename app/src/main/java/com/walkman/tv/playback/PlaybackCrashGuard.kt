@@ -20,6 +20,7 @@ import java.io.File
 object PlaybackCrashGuard {
     private const val ATTEMPT_FILE = "playback-attempt.json"
     private const val CRASHED_FILE = "crashed-tracks.json"
+    private const val DECODER_FILE = "playback-decoder.json"
 
     /** 崩过的歌拉黑多久：24 小时。过期后自动放出来（用户也可以手动点它再试）。 */
     private const val CRASH_TTL_MS = 24 * 60 * 60 * 1000L
@@ -41,6 +42,14 @@ object PlaybackCrashGuard {
         val trackId: String,
         val song: String,
         val crashedAtMs: Long,
+    )
+
+    /** 当前在用的解码器（:playback 里解码器初始化时写；主进程死后读它，见
+     *  PlaybackService 的 AnalyticsListener）。 */
+    @Serializable
+    data class DecoderInfo(
+        val decoder: String = "",
+        val atMs: Long = 0L,
     )
 
     @Serializable
@@ -76,6 +85,26 @@ object PlaybackCrashGuard {
     fun readAttempt(context: Context): PlaybackAttempt? {
         return runCatching { attemptStore(context).load() }.getOrNull()
             ?.takeIf { it.trackId.isNotBlank() }
+    }
+
+    private fun decoderStore(context: Context) = JsonStore(
+        File(context.filesDir, DECODER_FILE),
+        DecoderInfo.serializer(),
+        DecoderInfo(),
+    )
+
+    /** 解码器初始化时写（:playback 进程调）：当前在用哪个解码器
+     *  （"ffmpeg" / "c2.android.mp3.decoder" 等）。 */
+    fun writeDecoder(context: Context, decoder: String) {
+        runCatching {
+            decoderStore(context).save(DecoderInfo(decoder, System.currentTimeMillis()))
+        }
+    }
+
+    /** 读最近一次解码器记录；没有返回 null。 */
+    fun readDecoder(context: Context): DecoderInfo? {
+        return runCatching { decoderStore(context).load() }.getOrNull()
+            ?.takeIf { it.decoder.isNotBlank() }
     }
 
     /** 这首歌死透了（两次都死 / 换源也死），拉黑 24 小时。过期条目顺手清掉。 */

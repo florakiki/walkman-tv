@@ -2,6 +2,7 @@ package com.walkman.tv.playback
 
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
 import android.os.Message
 import android.os.Messenger
 import android.os.RemoteException
@@ -13,9 +14,12 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
+import androidx.media3.exoplayer.video.VideoRendererEventListener
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
@@ -23,6 +27,8 @@ import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.walkman.tv.di.CrashDiagnostics
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 
 /**
  * 播放进程的 Service（2026-11-27 第十五轮）：ExoPlayer 只活在这个 `:playback`
@@ -89,7 +95,14 @@ class PlaybackService : MediaSessionService() {
         // 为空，主进程那边连不上会后台重试，App 照样进首页）。
         val exoPlayer = runCatching {
             buildPlayer(this, preferFfmpeg = true).also {
-                CrashDiagnostics.recordPlaybackServiceStart(this, "播放器建成：FFmpeg 软解优先")
+                // 第十八轮：FFmpeg 之前其实一直没用上（DefaultRenderersFactory 反射找
+                // androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer，NextLib 的类在
+                // io.github.anilbeesetti…包下，ClassNotFound 被静默吞掉），所以这里
+                // 把库的实际可用情况也记下来，下次诊断直接看，不用再猜。
+                CrashDiagnostics.recordPlaybackServiceStart(
+                    this,
+                    "播放器建成：FFmpeg 软解优先（${ffmpegStatus()}）",
+                )
             }
         }.getOrElse { firstError ->
             android.util.Log.w(TAG, "FFmpeg-first player build failed, retrying platform-only", firstError)
@@ -97,7 +110,7 @@ class PlaybackService : MediaSessionService() {
                 buildPlayer(this, preferFfmpeg = false).also {
                     CrashDiagnostics.recordPlaybackServiceStart(
                         this,
-                        "播放器建成：平台解码（FFmpeg 优先失败：${firstError.javaClass.simpleName}: ${firstError.message}）",
+                        "播放器建成：平台解码（FFmpeg 优先失败：${firstError.javaClass.simpleName}: ${firstError.message}；${ffmpegStatus()}）",
                     )
                 }
             }.getOrElse { secondError ->
@@ -111,6 +124,18 @@ class PlaybackService : MediaSessionService() {
             }
         } ?: return
         player = exoPlayer
+        // 记下实际在解码的解码器名（FFmpeg 叫 "ffmpeg"，平台叫 c2.android.* 等）：
+        // 播放进程原生崩溃后，主进程读这条就知道是哪条解码器在崩（第十八轮）。
+        exoPlayer.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioDecoderInitialized(
+                eventTime: AnalyticsListener.EventTime,
+                decoderName: String,
+                initializedTimestampMs: Long,
+                initializationDurationMs: Long,
+            ) {
+                runCatching { PlaybackCrashGuard.writeDecoder(this@PlaybackService, decoderName) }
+            }
+        })
         mediaSession = runCatching {
             MediaSession.Builder(this, exoPlayer)
                 .setCallback(SessionCallback())
@@ -182,6 +207,17 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
+    /** FFmpeg 库在电视上的实际可用情况（下次诊断直接看这条，不用猜 FFmpeg 有没有在用）。 */
+    private fun ffmpegStatus(): String {
+        val available = runCatching { FfmpegLibrary.isAvailable() }.getOrDefault(false)
+        val mp3 = if (available) {
+            runCatching { FfmpegLibrary.supportsFormat(MimeTypes.AUDIO_MPEG) }.getOrDefault(false)
+        } else {
+            false
+        }
+        return "FFmpeg 库：${if (available) "可用" else "不可用"}，MP3：${if (mp3) "支持" else "不支持"}"
+    }
+
     /**
      * Build the ExoPlayer with settings tuned for music playback on Android TV
      * （从 PlaybackController 搬过来——播放器现在活在这个 :playback 进程里）：
@@ -193,9 +229,13 @@ class PlaybackService : MediaSessionService() {
      *   the stream to DSP/HDMI passthrough and bypass the processor chain (built-in
      *   gain + waveform meter). Users who want bit-perfect PCM/FLAC passthrough can
      *   switch Hi-Res 直通 on in settings; the main process applies it from there.
-     * - DefaultRenderersFactory in PREFER_EXTENSION mode so the bundled FLAC /
-     *   OPUS / VORBIS extension renderers (when present) win over the slower
-     *   MediaCodec path.
+     * - NextRenderersFactory (NextLib) in PREFER mode so the bundled FFmpeg audio
+     *   renderer wins over the platform MediaCodec path. Plain
+     *   DefaultRenderersFactory can't do this: it reflectively looks up
+     *   androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer, which isn't in the
+     *   build (NextLib's renderer lives in io.github.anilbeesetti…), so FFmpeg
+     *   was silently never used before round 18 — every song, including 找巢,
+     *   was decoded by the platform decoder all along.
      * - setEnableDecoderFallback(true)（第十五轮）：解码器初始化失败时自动换一个
      *   解码器再试。只能救初始化失败，播起来才崩的 SIGSEGV 救不了——那靠
      *   :playback 隔离。
@@ -222,7 +262,14 @@ class PlaybackService : MediaSessionService() {
         // audio offload (DSP / HDMI passthrough / A2DP offload), this chain is bypassed
         // entirely and the processor stops receiving samples — the consumer naturally
         // falls back to a synthetic waveform.
-        val renderersFactory = object : DefaultRenderersFactory(appContext) {
+        // 第十八轮：FFmpeg 必须用 NextLib 的 NextRenderersFactory（它直接 new
+        // io.github.anilbeesetti…FfmpegAudioRenderer），不能用 DefaultRenderersFactory——
+        // 后者反射找 androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer，那个类根本不在
+        // 包里（NextLib 的类在 io.github.anilbeesetti 包下），ClassNotFound 被静默吞掉，
+        // FFmpeg 渲染器从来没被创建过，所有歌一直都是平台 MediaCodec 在解，找巢的
+        // SIGSEGV 才拦不住。NextRenderersFactory 是 DefaultRenderersFactory 的子类，
+        // 同一套 setter、同样的 buildAudioSink 覆盖都能用。
+        val renderersFactory = object : NextRenderersFactory(appContext) {
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
@@ -237,6 +284,31 @@ class PlaybackService : MediaSessionService() {
                         DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor, gainProcessor),
                     )
                     .build()
+            }
+
+            override fun buildVideoRenderers(
+                context: Context,
+                extensionRendererMode: Int,
+                mediaCodecSelector: MediaCodecSelector,
+                enableDecoderFallback: Boolean,
+                eventHandler: Handler,
+                eventListener: VideoRendererEventListener,
+                allowedVideoJoiningTimeMs: Long,
+                out: ArrayList<Renderer>,
+            ) {
+                // MV 视频不走 FFmpeg 软解（仍走硬解，软解 1080p 在盒子上会卡）：
+                // 只给音频加 FFmpeg，视频这里传 OFF，让 NextRenderersFactory 跳过
+                // FfmpegVideoRenderer。
+                super.buildVideoRenderers(
+                    context,
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_OFF,
+                    mediaCodecSelector,
+                    enableDecoderFallback,
+                    eventHandler,
+                    eventListener,
+                    allowedVideoJoiningTimeMs,
+                    out,
+                )
             }
         }.apply {
             // FFmpeg 优先：扩展渲染器排在平台 MediaCodec 前面；关掉就是纯平台解码

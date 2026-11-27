@@ -67,7 +67,7 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
     /**
      * 内置源升级：包里带的 Ki.js（src/debug/assets，下个版本换了新脚本）比已存的上一版
      * 新时，把已存的上一版内置源换成包里新版。只认上一版内置源（@author 是 hello world
-     * 的那个），别的用户脚本一律不动；用户自己删掉内置源后不再补种。
+     * 或 "KITV | 安妮 | 星海" 的那个），别的用户脚本一律不动；用户自己删掉内置源后不再补种。
      *
      * 换法：新版沿用旧 id（SourceManager 按 id 去重，位置、启用状态都原地不动），
      * 先验证新版能加载（QuickJS 里跑起来、拿到 capabilities），成功了再换；
@@ -75,7 +75,12 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
      * 新版和已存的一样（已经升过了）就不动。返回升级后的有效列表。
      */
     private suspend fun upgradeBundledIfNeeded(list: List<UserScript>): List<UserScript> {
-        val old = list.firstOrNull { it.author == "hello world" } ?: return list
+        // 第十八轮：内置源的 author 早就不是 "hello world" 了（现在是 "KITV | 安妮 | 星海"），
+        // 只认 "hello world" 的话升级永远匹配不到，包里换了新 Ki.js 电视上也还是旧版在跑。
+        // 两个都认（老的是 "hello world"，现在的是 "KITV | 安妮 | 星海"）。
+        val old = list.firstOrNull {
+            it.author == "hello world" || it.author == "KITV | 安妮 | 星海"
+        } ?: return list
         // 内置源只进 debug 测试版：和上面首次种源同一道门，release 包里没有这个文件。
         val debuggable = (context.applicationInfo.flags and
             android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
