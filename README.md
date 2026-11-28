@@ -3,8 +3,8 @@
 > 一款面向大屏、遥控器友好的 **原生 Android TV 音乐播放器**，使用 **Kotlin + Jetpack Compose for TV** 编写，**安装后需先在设置页面配置自定义音源** ，否则播放不了音乐。
 
 <p>
-  <a href="https://github.com/florakiki/walkman-tv/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/florakiki/walkman-tv?display_name=tag&label=release&color=3DDC84"></a>
-  <a href="https://github.com/florakiki/walkman-tv/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/florakiki/walkman-tv/total?label=downloads&color=3DDC84"></a>
+  <a href="https://github.com/florakiki/KITV-music/releases/latest"><img alt="release" src="https://img.shields.io/github/v/release/florakiki/KITV-music?display_name=tag&label=release&color=3DDC84"></a>
+  <a href="https://github.com/florakiki/KITV-music/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/florakiki/KITV-music/total?label=downloads&color=3DDC84"></a>
   <img alt="platform" src="https://img.shields.io/badge/platform-Android%20TV-3DDC84">
   <img alt="language" src="https://img.shields.io/badge/Kotlin-Compose%20for%20TV-7F52FF">
   <img alt="minSdk" src="https://img.shields.io/badge/minSdk-23-blue">

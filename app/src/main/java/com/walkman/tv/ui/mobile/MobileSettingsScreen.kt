@@ -170,7 +170,7 @@ fun MobileSettingsScreen(modifier: Modifier = Modifier) {
 
         SettingSection("关于") {
             Text("KITV音乐 v${appContainer.updateManager.currentVersion}", fontSize = 14.sp, color = AppColors.TextPrimary)
-            Text("更新地址：github.com/florakiki/walkman-tv", fontSize = 12.sp, color = AppColors.TextMuted)
+            Text("更新地址：github.com/florakiki/KITV-music", fontSize = 12.sp, color = AppColors.TextMuted)
             Text("音源：Ki.js 内置（测试版），正式版不带源、需手动导入。", fontSize = 12.sp, color = AppColors.TextMuted)
         }
         Spacer(Modifier.height(96.dp))

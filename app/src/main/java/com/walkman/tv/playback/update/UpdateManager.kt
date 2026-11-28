@@ -201,7 +201,7 @@ class UpdateManager(
     companion object {
         private const val TAG = "UpdateManager"
         private const val OWNER = "florakiki"
-        private const val REPO = "walkman-tv"
+        private const val REPO = "KITV-music"
         private const val UA = "kitv-music-updater"
 
         // GitHub proxy prefixes for mainland China (official host is often blocked/slow). Prefix
