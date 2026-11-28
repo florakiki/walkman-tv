@@ -2,9 +2,7 @@ package com.walkman.tv.playback.update
 
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import android.util.Log
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
@@ -43,8 +41,8 @@ sealed interface UpdateState {
 /**
  * In-app updater: checks GitHub Releases for a newer version, downloads the ABI-matched APK to
  * the app cache, and hands it to the system package installer. No auto-install — the system
- * always shows its own confirm dialog, and on Android 8+ the user must have granted "install
- * unknown apps" to us first (we route them to that settings screen when needed).
+ * always shows its own confirm dialog (and on Android 8+ its own "install unknown apps" prompt
+ * if needed); like KITV, we just fire the install intent and let the system handle it.
  */
 class UpdateManager(
     private val appContext: Context,
@@ -116,36 +114,23 @@ class UpdateManager(
     }
 
     /**
-     * Launch the system installer for [file]. On Android 8+ this needs the "install unknown apps"
-     * grant; if we don't have it we send the user to that settings screen and return false so the
-     * caller can prompt them to come back and tap install again.
+     * Launch the system installer for [file]. Like KITV: fire the ACTION_VIEW install intent
+     * directly and let the system show its own installer / permission prompt. Do NOT pre-check
+     * canRequestPackageInstalls() or route to the settings screen first — the per-app
+     * "install unknown apps" settings page does not pop up on this Xiaomi TV, so the old
+     * pre-check path just swallowed the tap and never fired the install intent.
+     * Returns true if the intent was fired, false only if startActivity itself threw.
      */
     fun install(context: Context, file: File): Boolean {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
-            val pkgUri = Uri.parse("package:${context.packageName}")
-            runCatching {
-                context.startActivity(
-                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, pkgUri)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }.onFailure {
-                // Some TV firmwares lack the per-app screen — fall back to the global one.
-                runCatching {
-                    context.startActivity(
-                        Intent(Settings.ACTION_SECURITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
-                }
-            }
-            return false
-        }
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.provider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        runCatching { context.startActivity(intent) }
-            .onFailure { Log.w(TAG, "install intent failed", it) }
-        return true
+        return runCatching {
+            context.startActivity(intent)
+            true
+        }.onFailure { Log.w(TAG, "install intent failed", it) }.getOrDefault(false)
     }
 
     fun reset() { _state.value = UpdateState.Idle }

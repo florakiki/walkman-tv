@@ -832,7 +832,6 @@ private fun UpdateSection() {
     val ctx = LocalContext.current
     val mgr = appContainer.updateManager
     val state by mgr.state.collectAsState()
-    var permHint by remember { mutableStateOf(false) }
 
     // Check + download run on the process-lived appScope (not a composable scope) so leaving
     // Settings mid-flight doesn't cancel them — the StateFlow keeps progressing and the UI
@@ -862,12 +861,6 @@ private fun UpdateSection() {
             }
             is UpdateState.Downloaded -> {
                 Text("下载完成", color = AppColors.AccentGreen, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                if (permHint) {
-                    Text(
-                        "请在系统弹出的设置里允许「KITV音乐」安装未知应用，返回后再点「立即安装」。",
-                        color = AppColors.Warning, fontSize = 12.sp,
-                    )
-                }
             }
             else -> {} // Idle / Downloading — the button label carries the state
         }
@@ -892,7 +885,7 @@ private fun UpdateSection() {
                     is UpdateState.Available ->
                         appContainer.appScope.launch { mgr.download(s.release) }
                     is UpdateState.Downloaded ->
-                        permHint = !mgr.install(ctx, s.file)
+                        mgr.install(ctx, s.file)
                     else -> {} // Checking / Downloading — busy, no-op
                 }
             },

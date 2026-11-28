@@ -206,7 +206,6 @@ private fun MobileUpdateSection() {
     val ctx = LocalContext.current
     val mgr = appContainer.updateManager
     val state by mgr.state.collectAsState()
-    var permHint by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         if (mgr.state.value is UpdateState.Idle) appContainer.appScope.launch { mgr.check() }
@@ -223,7 +222,6 @@ private fun MobileUpdateSection() {
         }
         is UpdateState.Downloaded -> {
             Text("下载完成", color = AppColors.BrandPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            if (permHint) Text("请在系统弹出的设置里允许「KITV音乐」安装未知应用，返回后再点「立即安装」。", color = AppColors.Warning, fontSize = 12.sp)
         }
         else -> {}
     }
@@ -245,7 +243,7 @@ private fun MobileUpdateSection() {
                 is UpdateState.Available ->
                     appContainer.appScope.launch { mgr.download(s.release) }
                 is UpdateState.Downloaded ->
-                    permHint = !mgr.install(ctx, s.file)
+                    mgr.install(ctx, s.file)
                 else -> {}
             }
         },
