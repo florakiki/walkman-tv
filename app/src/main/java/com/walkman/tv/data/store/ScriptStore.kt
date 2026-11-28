@@ -131,14 +131,17 @@ class ScriptStore(private val context: Context, private val sourceManager: Sourc
      * are kept side by side instead of silently overwriting each other.
      */
     suspend fun import(raw: String): Result<Imported> {
-        val meta = parseHeader(raw)
+        // 加密版（KITV-AES: 开头）先在内存里解出来再导入；明文按原样走。
+        // 内置源调用前已解过一次，decryptIfPrefixed 对无前缀明文原样返回，重复调安全。
+        val text = KitvAes.decryptIfPrefixed(raw)
+        val meta = parseHeader(text)
         val script = UserScript(
             name = meta["name"] ?: "未命名脚本",
             description = meta["description"] ?: "",
             version = meta["version"] ?: "",
             author = meta["author"] ?: "",
             homepage = meta["homepage"] ?: "",
-            rawScript = raw,
+            rawScript = text,
             enabled = true,
         )
         val old = _scripts.value.firstOrNull { it.name == script.name && it.author == script.author }
