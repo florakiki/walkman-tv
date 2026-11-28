@@ -93,7 +93,15 @@ private class KuwoBoard(private val http: CatalogHttp) : BoardService {
         if ("ALFLAC" in codes) qs.add(Quality.FLAC)
         if ("AC4256" in codes || "DDJOC768" in codes) qs.add(Quality.FLAC24)
         if (qs.isEmpty()) { qs.add(Quality.K128); qs.add(Quality.K320) }
-        val duration = (d.optString("duration").ifEmpty { d.optString("song_duration") }).toIntOrNull()
+        // 酷我榜单接口里 `duration` 不是歌长（是个 1–5 的小码），真歌长在 `song_duration`（秒）。
+        // 原来先读 duration、只有它为空才读 song_duration——duration 永远不为空，
+        // 所以一直拿到 1–5 秒，列表全显示 00:01–00:05（2026-11-28，Yang 实测飙升榜）。
+        // 改成先读 song_duration；只有它没有时才退回 duration，而且太短的（<30 秒）
+        // 不可能是歌长，当作没有（不显示），别再把小码当成秒数。
+        // 注意：酷我歌单详情（pl.svc）里没有 song_duration，`duration` 本身就是真秒数，
+        // 那个解析在 SonglistCatalog 里，不在这里，别跟着改。
+        val duration = d.optString("song_duration").toIntOrNull()?.takeIf { it > 0 }
+            ?: d.optString("duration").toIntOrNull()?.takeIf { it > 30 }
         // Kuwo: MVFLAG=="1" means the song has an MV; the mvId is the same rid as the song.
         val extras = mutableMapOf<String, String>()
         if (d.optString("MVFLAG") == "1") extras["mvId"] = id

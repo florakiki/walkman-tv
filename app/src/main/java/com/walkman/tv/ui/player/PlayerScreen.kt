@@ -803,6 +803,7 @@ private suspend fun tryRequestFocus(target: FocusRequester) {
   }
 }
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun MvQueueDrawer(
   visible: Boolean,
@@ -857,7 +858,13 @@ private fun MvQueueDrawer(
               track = track,
               index = idx,
               isCurrent = isCurrent,
-              modifier = if (isCurrent) Modifier.focusRequester(firstFocus) else Modifier,
+              // 队列拉到头/尾：按下/按上停住吃键，别漏到抽屉外面去——抽屉盖住了控制栏，
+              // 焦点漏出去会落在被盖住的键上，屏幕上就看不到焦点框了（2026-11-28，
+              // Yang 实测：拉到最后一条 21 陀螺 (Live) 时焦点框不见了）。
+              modifier = Modifier
+                .then(if (isCurrent) Modifier.focusRequester(firstFocus) else Modifier)
+                .then(if (idx == 0) Modifier.focusProperties { up = FocusRequester.Cancel } else Modifier)
+                .then(if (idx == queue.size - 1) Modifier.focusProperties { down = FocusRequester.Cancel } else Modifier),
               onClick = { onSelect(idx) },
             )
           }

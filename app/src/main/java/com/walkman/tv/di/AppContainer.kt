@@ -347,7 +347,6 @@ class AppContainer(val appContext: Context) {
             }
             settingsStore.settings.onEach { s ->
                 playbackController.preferredQuality = s.preferredQuality
-                playbackController.builtinGainEnabled = s.builtinGainEnabled
                 // 硬件直通会把未解码的数据直接交给音频硬件，绕过解码器；强制软解时一并关掉。
                 playbackController.setAudioOffloadEnabled(s.audioOffloadEnabled && !s.forceSoftwareDecoding)
                 playbackController.forceSoftwareDecoding = s.forceSoftwareDecoding

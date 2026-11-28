@@ -261,6 +261,13 @@ fun TrackList(
     trapFocus: Boolean = false,
     /** trapFocus 且在第 0 行按上时调用（浮层内往上走：歌手页回专辑行、搜索页回 tab 行）；不设就停在第 0 行。 */
     onExitUp: (() -> Unit)? = null,
+    /** 焦点在 header 那块内容上时为 true（调用方在 header 的卡片上用 onFocusChanged 跟踪）。
+     * 为 true 时上下键不再按歌曲行步进，改走 [onHeaderKey]。不传就是 false，老样子。 */
+    headerHasFocus: Boolean = false,
+    /** trapFocus 且焦点在 header 上（或还没落到任何歌曲行）时，上下键先问这里。
+     * 返回 true 表示按键已处理（比如焦点在 header 的几个区之间移动）；返回 false 或不传
+     * 就按老样子落到第一首可见的歌曲行。 */
+    onHeaderKey: ((delta: Int) -> Boolean)? = null,
     /** 焦点行变化时回调（歌手页用它在进歌单深处时收起专辑区）。 */
     onFocusedIndexChange: ((Int) -> Unit)? = null,
     /** 外面传进来的列表滚动状态（不传就自己建一个）：歌手页翻页时外面要看滚到哪了，
@@ -330,8 +337,14 @@ fun TrackList(
     // 到头（第 0 行按上 / 最后一行按下）：trapFocus 时把按键吃掉、停在原地，绝不漏到列表外；
     // 非 trapFocus 保持原来的放行（顶层页面里焦点要能回到上面的 tab/行）。
     fun stepFocus(delta: Int): Boolean {
-        if (focusedIndex < 0) {
+        // 焦点在 header 上（或还没落到任何歌曲行）：上下键先问 header 那边的处理
+        // （几个区之间移动）；没人接才按老样子落到第一首可见的歌曲行。
+        // focusedIndex 是粘性的（行只在落上焦点时记，离开时不清），只看它会误判——
+        // 比如从歌曲行按上回到 header 再按下，会走到“上次那行 +1”而不是下一个区，
+        // 所以 header 上有没有焦点要调用方另外报（headerHasFocus）。
+        if (focusedIndex < 0 || headerHasFocus) {
             if (!trapFocus) return false
+            if (onHeaderKey?.invoke(delta) == true) return true
             if (tracks.isEmpty()) return true
             // layoutInfo 的下标是布局下标（header 占 0 号位），focuserFor 要的是歌曲下标，减掉偏移。
             val first = effectiveListState.layoutInfo.visibleItemsInfo.firstOrNull()?.index ?: headerOffset

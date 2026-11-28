@@ -345,6 +345,9 @@ private fun SearchInputBox(query: String) {
 
 // MARK: - Right panel --------------------------------------------------------------------------
 
+/** 搜索页右边 header 里的卡片区（按屏幕从上到下）。 */
+private enum class HeaderSection { ARTISTS, SONGLISTS, ALBUMS }
+
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 private fun ResultsPane(
@@ -399,6 +402,58 @@ private fun ResultsPane(
             else -> null
         }
     }
+    // --- header 区段导航（搜索页右边整列滚）：歌手/歌单/专辑三个区和歌曲行在同一个
+    // TrackList 里滚（header 插槽，见下面 else 分支）。TrackList 的步进只认歌曲行，
+    // 焦点在 header 卡片上时上下键要由这里接：headerSection 记当前在哪个区，
+    // onHeaderKey 按区顺序移焦点；移进歌曲行时 onFocusedIndexChange 把它清掉。
+    val scope = rememberCoroutineScope()
+    var headerSection by remember { mutableStateOf<HeaderSection?>(null) }
+    // 当前 tab 显示的卡片区（按屏幕从上到下）：只算有数据的区。
+    val visibleCardSections = remember(tab, artists, songlists, albums) {
+        buildList {
+            if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) add(HeaderSection.ARTISTS)
+            if ((tab == SearchTab.ALL || tab == SearchTab.PLAYLISTS) && songlists.isNotEmpty()) add(HeaderSection.SONGLISTS)
+            if ((tab == SearchTab.ALL || tab == SearchTab.ALBUMS) && albums.isNotEmpty()) add(HeaderSection.ALBUMS)
+        }
+    }
+    // 歌单去重（下面 header 和 onHeaderKey 都要用，提上来只算一次）。
+    val uniqueSonglists = remember(songlists) { songlists.distinctBy { it.id + "_" + it.source.key } }
+    // 各区第一张卡片的 key（和上面 topCardKey 同一套算法）：区之间移焦点时的落点。
+    fun firstSectionKey(section: HeaderSection): String? = when (section) {
+        HeaderSection.ARTISTS -> artists.firstOrNull()?.let { "${it.source.key}_${it.id}" }
+        HeaderSection.SONGLISTS -> uniqueSonglists.firstOrNull()?.let { "${it.id}_${it.source.key}" }
+        HeaderSection.ALBUMS -> albums.firstOrNull()?.let { "${it.source.key}_${it.name}" }
+    }
+    // header 里上下键：按区顺序移焦点（歌手 → 歌单 → 专辑 → 歌曲；往上反过来，
+    // 出了第一个区回上面的分类 tab 行）。目标卡片已经组合好时同步落上；没组合好时
+    // 先把列表滚回顶部（header 回到视野里）再重试。返回 true 表示按键已吃掉。
+    fun onHeaderKey(delta: Int): Boolean {
+        val cur = headerSection ?: return false
+        val idx = visibleCardSections.indexOf(cur)
+        if (idx < 0) return false
+        val targetIdx = idx + delta
+        // 往上出了第一个区：回上面的分类 tab 行（和歌曲第 0 行按上的出口一样）。
+        if (targetIdx < 0) { onSongsExitUp?.invoke(); return true }
+        // 往下出了最后一个区：进歌曲第 0 行（header 占布局 0 号位，它是 1 号位）。
+        if (targetIdx >= visibleCardSections.size) {
+            if (tracks.isEmpty()) return true  // 没有歌曲：到底了，停住吃键。
+            scope.launch {
+                runCatching { tracksListState.scrollToItem(1) }
+                delay(80)
+                runCatching { restore.focuserFor("search_tracks_row0").requestFocus() }
+                delay(50)
+                runCatching { restore.focuserFor("search_tracks_row0").requestFocus() }
+            }
+            return true
+        }
+        val key = firstSectionKey(visibleCardSections[targetIdx]) ?: return false
+        if (restore.tryFocusSync(key)) return true
+        scope.launch {
+            runCatching { tracksListState.scrollToItem(0) }
+            restore.restoreTo(key)
+        }
+        return true
+    }
     when {
         loading -> LoadingState(Modifier.fillMaxSize())
         !searched -> {
@@ -421,85 +476,94 @@ private fun ResultsPane(
             // 浮层关掉后回哪张卡片由上面那套 entryKey + restore 管；左边键盘按右进来落
             // restore.topCardKey 那张卡片。这里不用 focusRestorer：它在节点脱离时抛
             // IllegalStateException（2026-11-26 闪退根因），删掉。
-            Column(modifier = Modifier.fillMaxSize()) {
-            if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
-                SectionHeader("歌手 (${artists.size})")
-                LazyRow(
-                    state = artistRowState,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                ) {
-                    items(artists, key = { "${it.source.key}_${it.id}" }) { artist ->
-                        val artistKey = "${artist.source.key}_${artist.id}"
-                        ArtistCard(
-                            artist = artist,
-                            modifier = restore.modifierFor(artistKey),
-                            onClick = { artistEntryKey = artistKey; artistDetail = artist },
-                        )
-                    }
-                }
-                Spacer(Modifier.padding(top = 8.dp))
-            }
-            if ((tab == SearchTab.ALL || tab == SearchTab.PLAYLISTS) && songlists.isNotEmpty()) {
-                SectionHeader("歌单 (${songlists.size})")
-                val uniqueSonglists = remember(songlists) { songlists.distinctBy { it.id + "_" + it.source.key } }
-                LazyRow(
-                    state = songlistRowState,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                ) {
-                    items(uniqueSonglists, key = { it.id + "_" + it.source.key }) { sl ->
-                        val slKey = "${sl.id}_${sl.source.key}"
-                        Box(modifier = Modifier.width(140.dp)) {
-                            MediaCard(
-                                title = sl.name,
-                                picURL = sl.picURL,
-                                subtitle = sl.playCount?.let { "▶ $it" },
-                                modifier = restore.modifierFor(slKey),
-                                onClick = { onPickSonglist(sl) },
-                            )
+            // 右边整列滚（2026-11-28）：歌手/歌单/专辑三个区 + 歌曲标题全在 TrackList
+            // 的 header 里，跟歌曲行在同一列里往下滚——原来三个区是 Column 里写死的，
+            // 专辑那排被顶在屏幕底边、按下也拉不下来，歌曲 TrackList 只剩 0 高。
+            // 没有歌曲时也一样（只有 header，没有行）：区多了照样能滚。
+            val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
+            TrackList(
+                tracks = tracks,
+                modifier = Modifier.fillMaxSize(),
+                nowPlayingId = nowId,
+                trapFocus = true,
+                onExitUp = onSongsExitUp,
+                onFocusedIndexChange = { headerSection = null },
+                headerHasFocus = headerSection != null,
+                onHeaderKey = { delta -> onHeaderKey(delta) },
+                listState = tracksListState,
+                entryFocuser = restore.focuserFor("search_tracks_row0"),
+                header = {
+                    if ((tab == SearchTab.ALL || tab == SearchTab.ARTISTS) && artists.isNotEmpty()) {
+                        SectionHeader("歌手 (${artists.size})")
+                        LazyRow(
+                            state = artistRowState,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp),
+                            modifier = Modifier.onFocusChanged { if (it.hasFocus) headerSection = HeaderSection.ARTISTS },
+                        ) {
+                            items(artists, key = { "${it.source.key}_${it.id}" }) { artist ->
+                                val artistKey = "${artist.source.key}_${artist.id}"
+                                ArtistCard(
+                                    artist = artist,
+                                    modifier = restore.modifierFor(artistKey),
+                                    onClick = { artistEntryKey = artistKey; artistDetail = artist },
+                                )
+                            }
                         }
+                        Spacer(Modifier.padding(top = 8.dp))
                     }
-                }
-                Spacer(Modifier.padding(top = 8.dp))
-            }
-            if ((tab == SearchTab.ALL || tab == SearchTab.ALBUMS) && albums.isNotEmpty()) {
-                SectionHeader("专辑 (${albums.size})")
-                LazyRow(
-                    state = albumRowState,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    contentPadding = PaddingValues(vertical = 4.dp),
-                ) {
-                    items(albums, key = { "${it.source.key}_${it.name}" }) { album ->
-                        val albumKey = "${album.source.key}_${album.name}"
-                        Box(modifier = Modifier.width(140.dp)) {
-                            MediaCard(
-                                title = album.name,
-                                picURL = album.picURL,
-                                subtitle = "${album.singer} · ${album.tracks.size} 首",
-                                modifier = restore.modifierFor(albumKey),
-                                onClick = { albumEntryKey = albumKey; albumDetail = album },
-                            )
+                    if ((tab == SearchTab.ALL || tab == SearchTab.PLAYLISTS) && songlists.isNotEmpty()) {
+                        SectionHeader("歌单 (${songlists.size})")
+                        LazyRow(
+                            state = songlistRowState,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp),
+                            modifier = Modifier.onFocusChanged { if (it.hasFocus) headerSection = HeaderSection.SONGLISTS },
+                        ) {
+                            items(uniqueSonglists, key = { it.id + "_" + it.source.key }) { sl ->
+                                val slKey = "${sl.id}_${sl.source.key}"
+                                Box(modifier = Modifier.width(140.dp)) {
+                                    MediaCard(
+                                        title = sl.name,
+                                        picURL = sl.picURL,
+                                        subtitle = sl.playCount?.let { "▶ $it" },
+                                        modifier = restore.modifierFor(slKey),
+                                        onClick = { onPickSonglist(sl) },
+                                    )
+                                }
+                            }
                         }
+                        Spacer(Modifier.padding(top = 8.dp))
                     }
-                }
-                Spacer(Modifier.padding(top = 8.dp))
-            }
-            if ((tab == SearchTab.ALL || tab == SearchTab.SONGS) && tracks.isNotEmpty()) {
-                SectionHeader("歌曲 (${tracks.size})")
-                val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
-                TrackList(
-                    tracks = tracks,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
-                    nowPlayingId = nowId,
-                    trapFocus = true,
-                    onExitUp = onSongsExitUp,
-                    listState = tracksListState,
-                    entryFocuser = restore.focuserFor("search_tracks_row0"),
-                    onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
-                )
-            }
-            }
+                    if ((tab == SearchTab.ALL || tab == SearchTab.ALBUMS) && albums.isNotEmpty()) {
+                        SectionHeader("专辑 (${albums.size})")
+                        LazyRow(
+                            state = albumRowState,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            contentPadding = PaddingValues(vertical = 4.dp),
+                            modifier = Modifier.onFocusChanged { if (it.hasFocus) headerSection = HeaderSection.ALBUMS },
+                        ) {
+                            items(albums, key = { "${it.source.key}_${it.name}" }) { album ->
+                                val albumKey = "${album.source.key}_${album.name}"
+                                Box(modifier = Modifier.width(140.dp)) {
+                                    MediaCard(
+                                        title = album.name,
+                                        picURL = album.picURL,
+                                        subtitle = "${album.singer} · ${album.tracks.size} 首",
+                                        modifier = restore.modifierFor(albumKey),
+                                        onClick = { albumEntryKey = albumKey; albumDetail = album },
+                                    )
+                                }
+                            }
+                        }
+                        Spacer(Modifier.padding(top = 8.dp))
+                    }
+                    if (tracks.isNotEmpty()) {
+                        SectionHeader("歌曲 (${tracks.size})")
+                    }
+                },
+                onPlay = { idx -> playList(tracks, idx); onOpenPlayer() },
+            )
             albumDetail?.let { album ->
                 AlbumDetailOverlay(
                     album = album,
@@ -1485,3 +1549,4 @@ fun AllAlbumsOverlay(
     }
     androidx.activity.compose.BackHandler { onBack() }
 }
+

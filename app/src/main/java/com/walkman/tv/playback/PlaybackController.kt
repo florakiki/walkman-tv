@@ -194,13 +194,8 @@ class PlaybackController(
     /** release() 后为 true：后台重连循环停掉，不再发起新连接。 */
     private var released = false
 
-    /** 增益开关（设置 → 增益）：值存在这儿，发给 :playback（见 [sendPlaybackCommand]）；
-     *  播放器在 :playback 进程里，GainAudioProcessor 也在那儿。默认开，跟设置默认值一致。 */
-    @Volatile var builtinGainEnabled: Boolean = true
-        set(value) {
-            field = value
-            sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, value)
-        }
+    /** 增益（第二十五轮）：固定开、约 +3dB，不再有开关。GainAudioProcessor 在
+     *  :playback 进程的音频链里默认就是开的，主进程不用发命令、也不存这个值。 */
 
     /** 强制软件解码：只用系统自带的软件解码器（c2.android.* / OMX.google.*），绕开部分电视、盒子
      *  厂商硬件解码器的闪退或无声问题。解码器在每次准备新歌时挑选，所以切换后从下一首开始生效。
@@ -1134,16 +1129,15 @@ class PlaybackController(
         runCatching { CrashDiagnostics.recordPlaybackConnected(appContext) }
         controller.addListener(playerListener)
         // 把当前设置发给 :playback（刚建好的播放器用的是默认值）。
-        sendPlaybackCommand(PlaybackService.CMD_SET_GAIN_ENABLED, builtinGainEnabled)
         sendPlaybackCommand(PlaybackService.CMD_SET_FORCE_SOFTWARE_DECODING, forceSoftwareDecoding)
         applyAudioOffload()
         // 第二十轮：记下主进程发给服务的值——跟服务那边的 [音频设置] 对上，
-        // 两边不一样就说明自定义命令没送到。
+        // 两边不一样就说明自定义命令没送到。增益是固定开的，不用发命令。
         runCatching {
             CrashDiagnostics.recordAudioState(
                 appContext,
                 "主进程",
-                "发给服务：增益${if (builtinGainEnabled) "开" else "关"}" +
+                "发给服务：增益固定开（约 +3dB）" +
                     "、直通${if (audioOffloadEnabled) "开" else "关"}" +
                     "、强制软解${if (forceSoftwareDecoding) "开" else "关"}",
             )
@@ -1155,7 +1149,7 @@ class PlaybackController(
         recovery?.invoke()
     }
 
-    /** 给 :playback 发一个带开关值的自定义命令（增益 / 强制软件解码）。没连上就丢掉，
+    /** 给 :playback 发一个带开关值的自定义命令（强制软件解码）。没连上就丢掉，
      *  连上时会重发当前值（见 onControllerConnected）。 */
     private fun sendPlaybackCommand(action: String, enabled: Boolean) {
         val controller = mediaController ?: return

@@ -118,16 +118,14 @@ fun MobileSettingsScreen(modifier: Modifier = Modifier) {
         }
 
         SettingSection("音频") {
-            SwitchRow("内置增益（声音偏小时开启，约 +3dB）", settings.builtinGainEnabled) {
-                scope.launch { appContainer.settingsStore.update { it.copy(builtinGainEnabled = !it.builtinGainEnabled) } }
-            }
+            // 第二十五轮：增益固定开（约 +3dB），开关撤掉。
             SwitchRow("Hi-Res 硬件直通（播放无损闪退时请关闭）", settings.audioOffloadEnabled) {
                 scope.launch { appContainer.settingsStore.update { it.copy(audioOffloadEnabled = !it.audioOffloadEnabled) } }
             }
             SwitchRow("强制软件解码（播放闪退或没声音时请开启）", settings.forceSoftwareDecoding) {
                 scope.launch { appContainer.settingsStore.update { it.copy(forceSoftwareDecoding = !it.forceSoftwareDecoding) } }
             }
-            Text("硬件直通默认关闭；直通开着时内置增益不生效。", fontSize = 12.sp, color = AppColors.TextMuted)
+            Text("内置增益固定开启（约 +3dB）；硬件直通默认关闭，直通开着时增益不生效。", fontSize = 12.sp, color = AppColors.TextMuted)
         }
 
         SettingSection("歌词") {

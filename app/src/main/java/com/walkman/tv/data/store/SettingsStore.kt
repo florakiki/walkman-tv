@@ -42,9 +42,6 @@ data class Settings(
      *  normal PCM path (offload can still be switched on in settings). Only affects fresh
      *  installs — existing users keep whatever value they already stored. */
     val audioOffloadEnabled: Boolean = false,
-    /** 内置增益：App 内把音量再放大一级（约 +3dB，带防破音软限幅），不改电视系统音量。
-     *  默认开启；硬件直通开启时 PCM 处理链被绕过，增益不生效。见 GainAudioProcessor。 */
-    val builtinGainEnabled: Boolean = true,
     /** 强制软件解码（音频）。部分电视、盒子的硬件解码器会闪退或没声音，开启后只用系统软件解码器，
      *  同时关闭硬件直通。默认关闭。 */
     val forceSoftwareDecoding: Boolean = false,

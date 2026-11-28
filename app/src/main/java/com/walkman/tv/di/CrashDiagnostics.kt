@@ -270,8 +270,9 @@ object CrashDiagnostics {
 
     /**
      * 记音频设置实况（第二十轮）：主进程发了什么、:playback 收到什么、实际在
-     * 用哪个解码器、增益处理器到底处理了多少采样。增益开关开/关没效果时靠这条
-     * 定性——服务没收到命令、处理链被直通绕过、还是增益本身没生效，一看就知道。
+     * 用哪个解码器、增益处理器到底处理了多少采样。增益没效果时靠这条定性——
+     * 处理链被直通绕过、还是增益本身没生效，一看就知道（第二十五轮：增益固定开，
+     * 不再有“服务没收到命令”这一项）。
      */
     fun recordAudioState(context: Context, where: String, detail: String) {
         val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())

@@ -40,7 +40,7 @@ import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
  * onDisconnected）后重启播放进程、换源或跳下一首，App 不退桌面。
  *
  * 主进程通过 MediaController（Media3 session IPC）跟它通信：播 / 停 / 切歌 /
- * 队列 / 进度都走 Player 接口；增益开关、强制软件解码走自定义命令；音量电平
+ * 队列 / 进度都走 Player 接口；强制软件解码走自定义命令；音量电平
  * （AudioLevelProcessor 的回调）走 Messenger 回推。主进程不直接碰这个播放器。
  *
  * 这个进程里只初始化播放器：Application.onCreate 在 :playback 里直接 return，
@@ -50,7 +50,6 @@ class PlaybackService : MediaSessionService() {
 
     companion object {
         /** 主进程 → :playback 的自定义命令（SessionCommand.customAction）。 */
-        const val CMD_SET_GAIN_ENABLED = "com.walkman.tv.playback.SET_GAIN_ENABLED"
         const val CMD_SET_FORCE_SOFTWARE_DECODING = "com.walkman.tv.playback.SET_FORCE_SOFTWARE_DECODING"
         const val CMD_REGISTER_LEVEL_MESSENGER = "com.walkman.tv.playback.REGISTER_LEVEL_MESSENGER"
 
@@ -69,12 +68,11 @@ class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var player: ExoPlayer? = null
+    /** 增益（第二十五轮）：固定开、约 +3dB，没有开关也没有命令。GainAudioProcessor
+     *  默认就是开的（见 [GainAudioProcessor.enabled]），建播放器时直接挂进音频链，
+     *  不用等主进程发什么值——撤开关不能断线，增益一直开。 */
     private lateinit var gainProcessor: GainAudioProcessor
     private lateinit var levelProcessor: AudioLevelProcessor
-
-    /** 增益开关（主进程通过自定义命令发过来；默认开，跟设置默认值一致）。 */
-    @Volatile
-    var gainEnabled: Boolean = true
 
     /** 强制软件解码（主进程通过自定义命令发过来；默认关）。 */
     @Volatile
@@ -90,7 +88,10 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
-        gainProcessor = GainAudioProcessor().apply { enabled = gainEnabled }
+        // 第二十五轮：增益固定开——GainAudioProcessor 默认就是开的，直接建出来
+        // 挂进音频链，不用等命令。enabled 在这里不显式设，免得留一条“值从哪来”
+        // 的断线。
+        gainProcessor = GainAudioProcessor()
         levelProcessor = AudioLevelProcessor { level -> sendLevel(level) }
         // 建播放器（第十六轮：这里绝不能抛错杀掉 Service——启动闪退的头号嫌疑就是
         // 这里。先试 FFmpeg 优先；建不起来（比如这台电视加载 FFmpeg native 库失败）
@@ -127,7 +128,7 @@ class PlaybackService : MediaSessionService() {
             }
         } ?: return
         player = exoPlayer
-        // 第二十轮：记下建播放器时的音频实况（开关默认值、直通模式）。直通开着时
+        // 第二十轮：记下建播放器时的音频实况（增益固定开、直通模式）。直通开着时
         // 解码器永远不会初始化（音频走 DSP），那时这条就是唯一的音频证据。
         runCatching { recordAudioState(null) }
         // 记下实际在解码的解码器名（FFmpeg 叫 "ffmpeg"，平台叫 c2.android.* 等）：
@@ -191,7 +192,7 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    /** 主进程发来的自定义命令：增益开关、强制软件解码、注册音量 Messenger。 */
+    /** 主进程发来的自定义命令：强制软件解码、注册音量 Messenger。 */
     private inner class SessionCallback : MediaSession.Callback {
         @Suppress("DEPRECATION")
         override fun onCustomCommand(
@@ -201,16 +202,6 @@ class PlaybackService : MediaSessionService() {
             args: Bundle,
         ): ListenableFuture<SessionResult> {
             when (customCommand.customAction) {
-                CMD_SET_GAIN_ENABLED -> {
-                    val next = args.getBoolean(ARG_ENABLED, true)
-                    val changed = next != gainEnabled
-                    gainEnabled = next
-                    gainProcessor.enabled = gainEnabled
-                    Log.d(TAG, "gain enabled=$gainEnabled")
-                    // 第二十轮：值变了才记——开关拨了没效果时，诊断里没有这条就说明
-                    // 命令根本没到服务；有这条就说明服务收到了，问题在后面。
-                    if (changed) runCatching { recordAudioState(lastAudioStateDecoder) }
-                }
                 CMD_SET_FORCE_SOFTWARE_DECODING -> {
                     val next = args.getBoolean(ARG_ENABLED, false)
                     val changed = next != forceSoftwareDecoding
@@ -239,8 +230,9 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 把当前音频实况写进诊断（第二十轮）：服务收到的开关值、直通模式、实际解码
-     * 器、增益处理器处理过的采样数。增益开关开/关没效果时，这条就是定性的证据。
+     * 把当前音频实况写进诊断（第二十轮）：直通模式、实际在用的解码器、增益处理器
+     * 处理过的采样数。增益是固定开的（第二十五轮），这里只记“固定开”——增益
+     * 没效果时，看采样数是不是在涨、直通是不是开着，就能定性。
      */
     private fun recordAudioState(decoder: String?) {
         val offloadMode = player?.trackSelectionParameters?.audioOffloadPreferences?.audioOffloadMode
@@ -248,7 +240,7 @@ class PlaybackService : MediaSessionService() {
             TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
         ) "开" else "关"
         val detail = buildString {
-            appendLine("增益开关：${if (gainEnabled) "开" else "关"}（服务已收到）")
+            appendLine("增益：固定开（约 +3dB）")
             appendLine("硬件直通：$offload")
             appendLine("强制软解：${if (forceSoftwareDecoding) "开" else "关"}")
             appendLine("解码器：${decoder ?: "（还没解码）"}")
@@ -380,9 +372,9 @@ class PlaybackService : MediaSessionService() {
             // handleAudioFocus = false（2026-11-26）：之前开着时，系统 / 别的 App 一抢音频焦点，
             // ExoPlayer 就把音量压到约 20%（ducking），焦点回来再恢复——同一首歌里音量
             // 一会儿有一会儿没有、反复切好几次，听着就像增益在来回开关。增益本身在代码
-            // 里没有任何中途重置的路径（播放器只建一次、换源一首只换一次、开关只响应
-            // 用户点按），所以这条反复压音量的路只能是焦点 ducking。关掉它：同一首歌
-            // 从头到尾音量只由增益开关决定。代价：别的 App 放音频时音乐不再自动让路
+            // 里没有任何中途重置的路径（播放器只建一次、换源一首只换一次、增益固定开
+            // 没有开关可拨），所以这条反复压音量的路只能是焦点 ducking。关掉它：同一首歌
+            // 从头到尾音量只由固定增益决定。代价：别的 App 放音频时音乐不再自动让路
             // （不会暂停 / 压低），要停得手动按一下——电视上没电话，这点可以接受。
             .setAudioAttributes(audioAttrs, /* handleAudioFocus = */ false)
             .setHandleAudioBecomingNoisy(true)

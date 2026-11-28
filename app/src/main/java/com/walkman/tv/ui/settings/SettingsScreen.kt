@@ -269,21 +269,17 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         }
 
         Section("内置音量") {
-            ToggleRow("内置增益（声音偏小时开启，约 +3dB）", settings.builtinGainEnabled) {
-                scope.launch { appContainer.settingsStore.update { it.copy(builtinGainEnabled = !it.builtinGainEnabled) } }
-            }
-            Spacer(Modifier.height(8.dp))
+            // 第二十五轮：增益固定开（约 +3dB），开关撤掉。直通开着时增益还是被绕过，
+            // 在这里直接说出来。
             Text(
-                "在 App 内把音量再放大一级（约 +3dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
+                "内置增益固定开启（约 +3dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )
-            // 第二十轮：直通开着时增益开关是摆设（音频走硬件直通、绕过增益），
-            // 在这里直接说出来，免得拨了开关没效果还以为开关坏了。
             if (settings.audioOffloadEnabled) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "硬件直通已开启：音频走硬件直通，内置增益不生效。想用增益请先关闭“Hi-Res 硬件直通”。",
+                    "硬件直通已开启：音频走硬件直通，内置增益（固定 +3dB）不生效。关闭直通后增益自动生效。",
                     color = AppColors.Warning,
                     fontSize = 11.sp,
                 )
