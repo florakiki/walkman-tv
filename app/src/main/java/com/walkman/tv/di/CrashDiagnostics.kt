@@ -145,6 +145,29 @@ object CrashDiagnostics {
     }
 
     /**
+     * 记一次按音质换源（第二十七轮）：主源给的地址实测音质低于请求档位，换其它源
+     * 找到更好的就播更好的。记哪首歌、从哪个源的什么实测音质、换到哪个源的
+     * 什么实测音质。跟 [音质] 写同一个文件、同一个查看入口，只在真换了源时记。
+     */
+    fun recordQualitySwitch(
+        context: Context,
+        song: String,
+        fromLabel: String,
+        fromMeasured: String,
+        toLabel: String,
+        toMeasured: String,
+    ) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[按音质换源] $time")
+            appendLine("歌曲：$song")
+            appendLine("从：$fromLabel（实测 $fromMeasured）")
+            appendLine("到：$toLabel（实测 $toMeasured）")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
      * 留痕（2026-11-27 第十五轮）：解析出地址后、setMediaItem 之前记一条“正在播”，
      * 把赢家地址（URL + 来源平台 + 歌名 + 档位）写进播放失败记录同一个文件、
      * 同一个 20 条上限，设置页“查看诊断记录”本来就读它。播放进程原生闪退死后，

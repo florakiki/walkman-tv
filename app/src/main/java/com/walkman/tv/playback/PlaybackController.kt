@@ -107,6 +107,11 @@ class PlaybackController(
      *  of bouncing between platforms forever. Reset on a fresh playAt(). */
     private var crossSourceTriedFor: String? = null
 
+    /** 按音质换源已试过这首歌（第二十七轮）：一首歌只为音质换一次源，避免反复换源
+     *  拖播放。跟播时换源（crossSourceTriedFor）分开记：音质换源不占失败换源的
+     *  名额，换完音质、播起来又失败时失败换源还能再试一次。Reset on a fresh playAt(). */
+    private var qualitySwitchTriedFor: String? = null
+
     /** Background pre-resolution of the next track in the queue. [preloadCache] holds a
      *  fully-resolved URL (already cross-source-fallback'd by resolveMusicURL) so the
      *  next song starts without waiting for script calls; a dead next track is
@@ -269,6 +274,11 @@ class PlaybackController(
          *  “正在获取播放地址…”。正常解析几秒就完，慢的也就几十秒，
          *  90 秒不会误伤正常解析。 */
         const val RESOLVE_TIMEOUT_MS = 90_000L
+
+        /** 按音质换源时，换其它源最多等多久（第二十七轮）：超时就播手里最好的那个
+         *  候选，别把播放拖太久。换源本身是并行抢答（第一个成功的就用），正常
+         *  几秒就回；30 秒是兜底。 */
+        const val QUALITY_SWITCH_TIMEOUT_MS = 30_000L
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -467,6 +477,7 @@ class PlaybackController(
             lastAttemptedSources = emptyList()
             networkRetryCount = 0
             crossSourceTriedFor = null
+            qualitySwitchTriedFor = null
             // 用户主动点了一首新歌：这首歌之前的死亡计数清掉（重新给一次机会）。
             playbackDeathsByTrack.remove(track.id)
             // A new track is starting — the old preload (if any) is for a different next.
@@ -575,8 +586,45 @@ class PlaybackController(
                 tryCrossSourceOrAdvance(track, "点播前拦截到脏地址（${dirty.reason}）", silent = true)
                 return
             }
+            // 按音质换源（第二十七轮）：验地址关口只验“能不能播”，不管音质——脚本说
+            // Hi-Res、实际给 56kbps MP3 也能过关，App 就直接播了。拿到地址先量实际
+            // 音质，低于请求档位就换其它源再找更好的；实在没有更好的，播手里最好的
+            // 那个候选。只对 http(s) 在线地址做：本地文件（已下载/SAF 导入）就是要
+            // 播那个文件，不换源。量不出（超时/探头空/容器不认）一律按原样播，
+            // 绝不把播放卡死。
+            var chosen = r
+            var chosenSpec: AudioSpec? = null
+            var switchedQuality = false
+            if (scheme in setOf("http", "https")) {
+                val spec = probeSpec(r.url)
+                if (spec != null) {
+                    val measured = displayQuality(r.quality, spec)
+                    if (measured != null && Quality.rank(measured) > Quality.rank(r.quality)) {
+                        // 实测低于请求档位：先把这个候选留着当保底，再换源找更好的。
+                        chosenSpec = spec
+                        val better = maybeQualitySwitch(track, r, spec, measured)
+                        if (better != null) {
+                            chosen = better.first
+                            chosenSpec = better.second
+                            switchedQuality = true
+                        }
+                    } else {
+                        chosenSpec = spec
+                    }
+                }
+            }
+            // 角标要显示的档位：量到实测规格就按它校正（低于请求档位时角标不再一直
+            // 显示请求档位），量不到就显示请求档位（跟原来一样）。
+            val displayQ = if (chosenSpec != null) {
+                displayQuality(chosen.quality, chosenSpec) ?: chosen.quality
+            } else {
+                chosen.quality
+            }
+            // 质量换源时换来的地址自带一句“当前源无法获取播放地址，已自动换源”，
+            // 在这里是错的（原源给了地址，只是音质低）——静默换源，不显示。
+            val playWarning = if (switchedQuality) null else chosen.warning
             val item = MediaItem.Builder()
-                .setUri(r.url)
+                .setUri(chosen.url)
                 .setMediaMetadata(
                     MediaMetadata.Builder()
                         .setTitle(track.name)
@@ -588,9 +636,10 @@ class PlaybackController(
                 .build()
             // Remember the tier so onPlayerError can re-cascade from one tier below if
             // ExoPlayer rejects the file format.
-            lastAttemptedQuality = r.quality
+            lastAttemptedQuality = chosen.quality
             // 记下这次解析试过哪些源（播时换源成功会再并进来），播失败写诊断记录时用。
-            lastAttemptedSources = (lastAttemptedSources + r.attemptedSources).distinct()
+            // 质量换源时原地址和换来的地址都算试过。
+            lastAttemptedSources = (lastAttemptedSources + r.attemptedSources + chosen.attemptedSources).distinct()
             // Successful resolve + setMediaItem → reset the network retry counter so the
             // next track gets a fresh budget.
             networkRetryCount = 0
@@ -598,7 +647,7 @@ class PlaybackController(
             // 第十八轮：失败原因里带上连接失败的次数和最后一次原因，诊断里一眼能看到
             // 是连不上、还是连上又断了。
             val remote = awaitPlayer() ?: run {
-                failAndAdvance("播放进程未连接${connectionFailureSummary()}", r.attemptedSources)
+                failAndAdvance("播放进程未连接${connectionFailureSummary()}", chosen.attemptedSources)
                 return
             }
             // 留痕（第十五轮）：解析出地址后、setMediaItem 之前，把赢家地址写进诊断
@@ -608,76 +657,144 @@ class PlaybackController(
                 CrashDiagnostics.recordNowPlaying(
                     appContext,
                     "${track.name} - ${track.singer}",
-                    r.origin.label,
-                    r.quality.displayName,
-                    r.url,
+                    chosen.origin.label,
+                    chosen.quality.displayName,
+                    chosen.url,
                 )
                 PlaybackCrashGuard.writeAttempt(
                     appContext,
                     track.id,
                     "${track.name} - ${track.singer}",
-                    r.url,
-                    r.origin.label,
-                    r.quality.displayName,
+                    chosen.url,
+                    chosen.origin.label,
+                    chosen.quality.displayName,
                 )
             }
             remote.setMediaItem(item)
             remote.prepare()
-            // Fire the file-header probe so the badge can later clamp the claimed tier
-            // down if the bytes turn out to be lower-grade than the script reported.
-            // Spec §5.4: clear current spec first, run async, validate URL is still
-            // current before publishing.
-            // 2026-11-26 音质核对：脚本只回一个 URL、不回它实际用的档位，ResolvedTrack.quality
-            // 记的是“请求档位”（pickPlayQuality 定的 first），不是到手那份文件的档位——
-            // 提供方静默降档（要 FLAC24 给了 128k/AAC）时角标会一直显示请求档位，听着发闷
-            // 却看不出原因。探头是唯一实测：拿到结果就按 displayQuality 校正 state.quality
-            // （角标只有一个真相来源），并把“请求档位 vs 实测”写进诊断记录；探头不认的容器
-            // （AAC/M4A 等）也记一笔，免得角标显示 Hi-Res、实际却没测到。
+            // 角标校正：2026-11-26 音质核对——脚本只回一个 URL、不回它实际用的档位，
+            // ResolvedTrack.quality 记的是“请求档位”，不是到手那份文件的档位；
+            // 提供方静默降档（要 FLAC24 给了 128k/AAC）时角标会一直显示请求档位，
+            // 听着发闷却看不出原因。探头是唯一实测：拿到结果就按 displayQuality
+            // 校正 state.quality（角标只有一个真相来源），并把“请求档位 vs 实测”
+            // 写进诊断记录；探头不认的容器（AAC/M4A 等）也记一笔。
+            // 第二十七轮：按音质换源时已经量过一次实测规格，直接用它校正角标，
+            // 不用等播起来后再探一次；量不出的才走原来的异步探头。
             // lastAttemptedQuality 不动：降级重试要从“尝试过的档位”往下走，不是实测档位。
-            _audioSpec.value = null
-            probingUrl = r.url
-            probeJob?.cancel()
-            // 第二十六轮：audioSpecProbe 是 by lazy（自定义 getter，不能 smart cast），
-            // 先取到本地变量再用（和上面 gate 那处的 gateProbe 同名会冲突，另起名）。
-            val specProbe = audioSpecProbe
-            if (specProbe != null) {
-                val claimedQuality = r.quality
-                val songLabel = "${track.name} - ${track.singer}"
-                probeJob = scope.launch {
-                    val targetUrl = r.url
-                    val spec = specProbe.probe(targetUrl)
-                    if (probingUrl != targetUrl) return@launch
-                    if (spec != null) {
-                        _audioSpec.value = spec
-                        val shown = displayQuality(claimedQuality, spec)
-                        if (shown != null && Quality.rank(shown) > Quality.rank(claimedQuality)) {
-                            _state.value = _state.value.copy(quality = shown)
+            val songLabel = "${track.name} - ${track.singer}"
+            if (chosenSpec != null) {
+                _audioSpec.value = chosenSpec
+                if (Quality.rank(displayQ) > Quality.rank(chosen.quality)) {
+                    CrashDiagnostics.recordQualityNote(
+                        appContext,
+                        songLabel,
+                        requested = chosen.quality.displayName,
+                        measured = chosenSpec.displayText,
+                    )
+                }
+            } else {
+                _audioSpec.value = null
+                probingUrl = chosen.url
+                probeJob?.cancel()
+                // 第二十六轮：audioSpecProbe 是 by lazy（自定义 getter，不能 smart cast），
+                // 先取到本地变量再用（和上面 gate 那处的 gateProbe 同名会冲突，另起名）。
+                val specProbe = audioSpecProbe
+                if (specProbe != null) {
+                    val claimedQuality = chosen.quality
+                    probeJob = scope.launch {
+                        val targetUrl = chosen.url
+                        val spec = specProbe.probe(targetUrl)
+                        if (probingUrl != targetUrl) return@launch
+                        if (spec != null) {
+                            _audioSpec.value = spec
+                            val shown = displayQuality(claimedQuality, spec)
+                            if (shown != null && Quality.rank(shown) > Quality.rank(claimedQuality)) {
+                                _state.value = _state.value.copy(quality = shown)
+                                CrashDiagnostics.recordQualityNote(
+                                    appContext,
+                                    songLabel,
+                                    requested = claimedQuality.displayName,
+                                    measured = spec.displayText,
+                                )
+                            }
+                        } else if (Quality.rank(claimedQuality) <= Quality.rank(Quality.FLAC)) {
                             CrashDiagnostics.recordQualityNote(
                                 appContext,
                                 songLabel,
                                 requested = claimedQuality.displayName,
-                                measured = spec.displayText,
+                                measured = "文件头未识别（可能是 AAC/M4A 等探头不认的容器），角标显示的仍是请求档位",
                             )
                         }
-                    } else if (Quality.rank(claimedQuality) <= Quality.rank(Quality.FLAC)) {
-                        CrashDiagnostics.recordQualityNote(
-                            appContext,
-                            songLabel,
-                            requested = claimedQuality.displayName,
-                            measured = "文件头未识别（可能是 AAC/M4A 等探头不认的容器），角标显示的仍是请求档位",
-                        )
                     }
                 }
             }
             remote.playWhenReady = true
             _state.value = _state.value.copy(
                 resolving = false,
-                warning = r.warning,
-                originLabel = r.origin.label,
-                quality = r.quality,
+                warning = playWarning,
+                originLabel = chosen.origin.label,
+                quality = displayQ,
             )
             onTrackStarted?.invoke(track)
             // (lyrics already loaded in playAt when the track switched)
+    }
+
+    /**
+     * 量一个 http(s) 地址的实际音质规格（文件头 64KB 解析 FLAC/MP3 参数）。
+     * 量不出（超时/探头空/容器不认）返回 null = 未知，调用方按原样播。
+     * 5 秒超时兜底，绝不把播放卡死。
+     */
+    private suspend fun probeSpec(url: String): AudioSpec? {
+        val probe = audioSpecProbe ?: return null
+        return withTimeoutOrNull(GATE_TIMEOUT_MS) { probe.probe(url) }
+    }
+
+    /**
+     * 按音质换源（第二十七轮）：主源给的地址实测音质低于请求档位时，换其它平台
+     * 同一首歌再找更好的。返回换到的更好地址 + 它的实测规格；换不到更好的
+     * （没有其它源、超时、换来的也是脏地址、换来的并不更好）返回 null，
+     * 调用方播手里最好的那个候选。一首歌只换一次（[qualitySwitchTriedFor]）。
+     * 注意：这里不碰播时换源的 [crossSourceTriedFor]——音质换源不占失败换源
+     * 的名额，换完音质、播起来又失败时失败换源还能再试一次。
+     */
+    private suspend fun maybeQualitySwitch(
+        track: Track,
+        current: ResolvedTrack,
+        currentSpec: AudioSpec,
+        currentMeasured: Quality,
+    ): Pair<ResolvedTrack, AudioSpec>? {
+        if (qualitySwitchTriedFor == track.id) return null
+        qualitySwitchTriedFor = track.id
+        val alt = withTimeoutOrNull(QUALITY_SWITCH_TIMEOUT_MS) {
+            runCatching { sources.resolveOtherSource(track, preferredQuality) }.getOrNull()
+        } ?: return null
+        if (alt.url.isBlank() || alt.url == current.url) return null
+        // 换来的地址同样要过脏地址关口：脏的就丢掉，播手里最好的那个。
+        val altGate = withTimeoutOrNull(GATE_TIMEOUT_MS) {
+            audioSpecProbe?.validate(alt.url, track.duration)
+        } ?: AudioSpecProbe.HeadVerdict.Unknown("校验超时，放行")
+        if (altGate is AudioSpecProbe.HeadVerdict.Dirty) return null
+        val altSpec = probeSpec(alt.url) ?: return null
+        val altMeasured = displayQuality(alt.quality, altSpec) ?: return null
+        // 换来的必须严格好于手里的，才换；否则播手里最好的那个。
+        if (Quality.rank(altMeasured) >= Quality.rank(currentMeasured)) return null
+        runCatching {
+            CrashDiagnostics.recordQualitySwitch(
+                appContext,
+                "${track.name} - ${track.singer}",
+                originLabelFor(current.origin),
+                currentSpec.displayText,
+                originLabelFor(alt.origin),
+                altSpec.displayText,
+            )
+        }
+        return alt to altSpec
+    }
+
+    /** 诊断里用的来源名：换源的要带上是哪个平台（OtherSource 的 label 只有“已自动换源”）。 */
+    private fun originLabelFor(origin: ResolveOrigin): String = when (origin) {
+        is ResolveOrigin.OtherSource -> "已自动换源（${origin.source.displayName}）"
+        else -> origin.label
     }
 
     /**
