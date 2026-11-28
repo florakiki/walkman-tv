@@ -1,11 +1,13 @@
 package com.walkman.tv.ui.mobile
 
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -53,7 +55,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.walkman.tv.data.model.Playlist
+import com.walkman.tv.data.model.SourceID
 import com.walkman.tv.data.model.Track
+import com.walkman.tv.playback.imports.SonglistImporter
+import com.walkman.tv.playback.imports.SonglistRef
 import com.walkman.tv.ui.appContainer
 import com.walkman.tv.ui.playList
 import com.walkman.tv.ui.theme.AppColors
@@ -80,6 +85,7 @@ fun MobileLibraryScreen(
     var tab by remember { mutableStateOf(0) }
     var status by remember { mutableStateOf<String?>(null) }
     var showCreate by remember { mutableStateOf(false) }
+    var showImport by remember { mutableStateOf(false) }
     var detailList by remember { mutableStateOf<Playlist?>(null) }
     var pendingDelete by remember { mutableStateOf<Playlist?>(null) }
 
@@ -214,6 +220,12 @@ fun MobileLibraryScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text("${userLists.size} 个歌单", fontSize = 12.sp, color = AppColors.TextMuted)
                             Spacer(Modifier.weight(1f))
+                            // 第二十八轮：导入歌单入口——手机平板也要能粘贴 QQ / 网易 / 酷狗 /
+                            // 酷我分享链接导入，逻辑复用 SonglistImporter（见下面对话框）。
+                            OutlinedButton(onClick = { showImport = true }) {
+                                Text("导入歌单", fontSize = 13.sp, color = AppColors.BrandPrimary)
+                            }
+                            Spacer(Modifier.width(8.dp))
                             OutlinedButton(onClick = { showCreate = true }) {
                                 Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                                 Text("新建歌单", fontSize = 13.sp, color = AppColors.BrandPrimary)
@@ -263,6 +275,12 @@ fun MobileLibraryScreen(
                     status = "已新建歌单：$name"
                 }
             },
+        )
+    }
+    if (showImport) {
+        MobileSonglistImportDialog(
+            onDismiss = { showImport = false },
+            onImported = { count -> status = "已导入歌单，共 $count 首" },
         )
     }
     pendingDelete?.let { target ->
@@ -386,6 +404,156 @@ private fun CreateListDialog(onDismiss: () -> Unit, onConfirm: (String) -> Unit)
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/**
+ * 手机版导入歌单对话框（第二十八轮）：跟电视版 SonglistImportDialog 同一套流程
+ * （粘贴链接 → SonglistImporter.parse 实时识别 → 确定导入），导入逻辑直接复用
+ * SonglistImporter（parse / pureIdOrNull / importPlaylist），不重写。
+ * 电视版那个对话框是 540dp 宽、TV Material3、带“手机扫码推送”的，不适合手机屏，
+ * 所以界面按手机重做（Material3 AlertDialog + OutlinedTextField，触屏操作）：
+ * 点“粘贴”直接读剪贴板填进链接框，不用长按。
+ */
+@Composable
+private fun MobileSonglistImportDialog(
+    onDismiss: () -> Unit,
+    onImported: (Int) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var raw by remember { mutableStateOf("") }
+    var customName by remember { mutableStateOf("") }
+    var manualSource by remember { mutableStateOf<SourceID?>(null) }
+    var importing by remember { mutableStateOf(false) }
+    var errorText by remember { mutableStateOf<String?>(null) }
+
+    val parsedRef = remember(raw) { SonglistImporter.parse(raw) }
+    val pureId = remember(raw, parsedRef) {
+        if (parsedRef == null) SonglistImporter.pureIdOrNull(raw) else null
+    }
+    val canImport = !importing && (
+        parsedRef != null || (pureId != null && manualSource != null)
+        )
+    val startImport: (SonglistRef?) -> Unit = startImport@{ explicitRef ->
+        if (importing) return@startImport
+        val ref = explicitRef
+            ?: parsedRef
+            ?: pureId?.let { id -> manualSource?.let { s -> SonglistRef(s, id) } }
+            ?: return@startImport
+        importing = true
+        errorText = null
+        scope.launch {
+            runCatching {
+                SonglistImporter.importPlaylist(
+                    ref = ref,
+                    customName = customName.takeIf { it.isNotBlank() },
+                    songlists = appContainer.songlists,
+                    library = appContainer.libraryStore,
+                )
+            }.onSuccess { result ->
+                importing = false
+                onImported(result.count)
+                onDismiss()
+            }.onFailure { e ->
+                errorText = e.localizedMessage ?: e.toString()
+                importing = false
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = { if (!importing) onDismiss() },
+        title = { Text("导入歌单") },
+        text = {
+            Column {
+                Text(
+                    "粘贴酷我 / 酷狗 / QQ 音乐 / 网易云分享的歌单链接，导入后会在「自建歌单」里多一个歌单。",
+                    fontSize = 13.sp,
+                    color = AppColors.TextSecondary,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = it; errorText = null },
+                    placeholder = { Text("粘贴歌单分享链接") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = {
+                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                        val text = cm?.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+                        if (text.isNotBlank()) {
+                            raw = text
+                            errorText = null
+                        }
+                    }) {
+                        Text("粘贴", fontSize = 13.sp, color = AppColors.BrandPrimary)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    when {
+                        parsedRef != null -> Text(
+                            "✓ 已识别：${parsedRef.source.displayName}歌单",
+                            fontSize = 12.sp,
+                            color = AppColors.AccentGreen,
+                        )
+                        pureId != null -> Text(
+                            "识别为纯 ID，请选择来源平台",
+                            fontSize = 12.sp,
+                            color = AppColors.TextSecondary,
+                        )
+                        raw.isNotBlank() -> Text(
+                            "未识别 — 请粘贴酷我 / 酷狗 / QQ / 网易云的歌单分享链接",
+                            fontSize = 12.sp,
+                            color = AppColors.TextMuted,
+                        )
+                    }
+                }
+                if (pureId != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(SourceID.WY, SourceID.TX, SourceID.KG, SourceID.KW).forEach { s ->
+                            OutlinedButton(
+                                onClick = { manualSource = s },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    containerColor = if (manualSource == s) AppColors.BrandPrimary.copy(alpha = 0.15f) else Color.Transparent,
+                                ),
+                            ) {
+                                Text(s.displayName, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = customName,
+                    onValueChange = { customName = it },
+                    placeholder = { Text("歌单名（可选，留空用原歌单名）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (importing) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("正在拉取曲目…", fontSize = 13.sp, color = AppColors.AccentGreen)
+                }
+                errorText?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, fontSize = 12.sp, color = AppColors.Danger)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { startImport(null) },
+                enabled = canImport,
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.BrandPrimary),
+            ) { Text(if (importing) "导入中…" else "确定导入") }
+        },
+        dismissButton = {
+            TextButton(onClick = { if (!importing) onDismiss() }) { Text("取消") }
         },
     )
 }

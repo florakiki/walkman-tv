@@ -39,10 +39,11 @@ class AudioLevelProcessor(
         when (inputAudioFormat.encoding) {
             C.ENCODING_PCM_16BIT -> { bytesPerSample = 2; floatSamples = false }
             C.ENCODING_PCM_FLOAT -> { bytesPerSample = 4; floatSamples = true }
-            // 24/32-bit integer sources would need their own paths; in practice ExoPlayer
-            // upconverts those to float when setEnableAudioFloatOutput(true) is set on the
-            // renderers factory (we do). Anything else means we can't reason about samples,
-            // so refuse to install — sink will skip us and play normally.
+            // 24/32-bit integer sources would need their own paths; in practice they never
+            // reach us — float 输出已关（第二十八轮，见 PlaybackService），toInt16 在链子
+            // 前面先把一切转成 16-bit PCM，链子里只会见到 16-bit。Anything else means we
+            // can't reason about samples, so refuse to install — sink will skip us and
+            // play normally.
             else -> throw UnhandledAudioFormatException(inputAudioFormat)
         }
         smoothedLevel = 0f

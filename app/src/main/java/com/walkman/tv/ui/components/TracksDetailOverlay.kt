@@ -20,12 +20,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,8 +69,13 @@ fun TracksDetailOverlay(
     val playAllFocuser = remember { FocusRequester() }
     var focusedRow by remember { mutableStateOf(-1) }
     val songListState = rememberLazyListState()
-    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）。
+    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
+    // 第二十八轮：原来这里只有 topBarFocus?.invoke()，非推荐 tab 时它是 null，
+    // 按上就被吃掉、哪都去不了——这就是按钮按上到不了顶栏的根因。改成跟搜索页 /
+    // 歌手页同一套：有入口走入口，没有就退回空间焦点搜索（moveFocus Up），让
+    // 焦点自己找到顶栏；还找不到才停住。
     val topBarFocus = LocalTopBarFocus.current
+    val focusManager = LocalFocusManager.current
     DisposableEffect(title) {
         val entry = OverlayEntry(
             key = "tracksDetail",
@@ -128,10 +135,11 @@ fun TracksDetailOverlay(
                     .onPreviewKeyEvent { e ->
                         if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                         when (e.key) {
-                            // 按上 → 回顶栏当前 tab（推荐 tab 才有）；没有顶栏就停住吃键，
-                            // 别漏到后面的歌单网格页去。
+                            // 按上 → 回顶栏当前 tab（推荐 tab 才有入口）；没有入口就退回
+                            // 空间焦点搜索，让焦点自己找到顶栏，别漏到后面的歌单网格页去。
                             Key.DirectionUp -> {
-                                topBarFocus?.invoke()
+                                if (topBarFocus?.invoke() == true) return@onPreviewKeyEvent true
+                                focusManager.moveFocus(FocusDirection.Up)
                                 true
                             }
                             // 按下 → 回歌单第 0 行。

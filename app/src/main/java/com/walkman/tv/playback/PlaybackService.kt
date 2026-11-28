@@ -282,8 +282,14 @@ class PlaybackService : MediaSessionService() {
             .setPrioritizeTimeOverSizeThresholds(true)
             .build()
 
-        // Prefer bundled FLAC/OPUS/VORBIS extension renderers over MediaCodec; pipe audio at
-        // float precision so 24-bit sources don't get prematurely truncated to 16-bit PCM.
+        // Prefer bundled FLAC/OPUS/VORBIS extension renderers over MediaCodec.
+        // 第二十八轮：float 输出必须关——Media3 1.10.1 的 DefaultAudioSink.configure() 里，
+        // float 输出时只把 toFloatPcmAudioProcessor 放进管线，自定义 AudioProcessorChain
+        // （level + gain）只在 16-bit 那条分支才加进去；float 一开，FFmpeg 解码器跟着
+        // 出 float PCM，增益链就被整个绕过（samplesSeen 恒为 0、音频照常出声，这就是
+        // 增益一直没起作用的根因，2026-11-28 诊断 + logcat 证实）。关掉 float，解码器
+        // 出 16-bit PCM，toInt16 + 增益链永远在管线里，增益和波形电平都回来。代价：
+        // 24-bit Hi-Res 会被 toInt16 截到 16-bit（听感上基本无差），换增益真正工作。
         // (Audio offload is opted in via TrackSelectionParameters below — the deprecated
         //  DefaultRenderersFactory.setEnableAudioOffload was removed in Media3 1.4.)
         //
@@ -355,7 +361,7 @@ class PlaybackService : MediaSessionService() {
                 if (!forceSoftwareDecoding || !MimeTypes.isAudio(mimeType)) all
                 else all.filter { it.softwareOnly }.ifEmpty { all }
             }
-            .setEnableAudioFloatOutput(true)
+            .setEnableAudioFloatOutput(false) // 第二十八轮：必须关，见上面注释——float 开着增益链就被 Media3 绕过
             .setEnableAudioTrackPlaybackParams(true)
             .setEnableDecoderFallback(true)
 

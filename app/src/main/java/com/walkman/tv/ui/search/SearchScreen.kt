@@ -955,6 +955,9 @@ fun ArtistDetailOverlay(
     // 旧毛病（时灵时不灵）有一半是这个共用闹的：同一个请求器挂在两个节点上，请求落到
     // 哪个节点上看最后挂上的是谁，专辑区一切换、歌单行一重组，指向就变了。
     val songRow0Focus = remember { FocusRequester() }
+    // 第二十八轮：“全部播放”按钮的焦点请求器——专辑卡片按上先落到它上面，
+    // 再按上才到顶栏；焦点链：顶栏 → 全部播放 → 专辑卡片 → 歌单第 0 行 → 歌单。
+    val playAllFocuser = remember { FocusRequester() }
     // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
     // 专辑卡片在 TrackList 的 header 里，TrackList trapFocus 会把按上吃掉，
     // 所以回顶栏要在这里（浮层这一层）拦，不能指望放行后空间搜索自己找到顶栏。
@@ -1117,6 +1120,13 @@ fun ArtistDetailOverlay(
                 }
                 Key.DirectionUp -> {
                     if (focusedRow >= 0) return@onPreviewKeyEvent false
+                    // 第二十八轮：专辑卡片按上先落到“全部播放”按钮（歌单第 0 行按上
+                    // 还是回专辑卡片，不动），按钮上再按上才回顶栏；没有专辑时专辑
+                    // 卡片不存在，这支不会触发，直接走下面的回顶栏。
+                    if (albumCardFocused && songs.isNotEmpty()) {
+                        runCatching { playAllFocuser.requestFocus() }
+                        return@onPreviewKeyEvent true
+                    }
                     if (topBarFocus?.invoke() == true) return@onPreviewKeyEvent true
                     // 当前 section 没有顶栏入口（不是推荐）时退回空间焦点搜索，
                     // 跟排行榜那条路一样。
@@ -1148,6 +1158,33 @@ fun ArtistDetailOverlay(
                     ).joinToString(" · ")
                     if (stats.isNotEmpty()) {
                         Text(stats, color = AppColors.TextMuted, fontSize = 13.sp)
+                    }
+                }
+                // 第二十八轮：“全部播放”按钮（点它从第一首播这个歌手的全部歌曲），
+                // 样式和位置参照歌单详情页的全部播放按钮。歌曲没拉到时不显示。
+                // 焦点：按下 → 专辑卡片（有专辑）或歌单第 0 行；按上走浮层那层
+                // 的 Up 处理（回顶栏），不用这里拦。
+                if (songs.isNotEmpty()) {
+                    TvPill(
+                        onClick = { playList(songs, 0); onOpenPlayer() },
+                        modifier = Modifier
+                            .padding(start = 12.dp)
+                            .focusRequester(playAllFocuser)
+                            .onFocusChanged { if (it.isFocused) focusedRow = -1 }
+                            .onPreviewKeyEvent { e ->
+                                if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                if (e.key == Key.DirectionDown) {
+                                    if (albums.isNotEmpty()) {
+                                        runCatching { anchorFocus.requestFocus() }
+                                    } else {
+                                        runCatching { songRow0Focus.requestFocus() }
+                                    }
+                                    true
+                                } else false
+                            },
+                        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 9.dp),
+                    ) {
+                        Text("全部播放", fontSize = 14.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
