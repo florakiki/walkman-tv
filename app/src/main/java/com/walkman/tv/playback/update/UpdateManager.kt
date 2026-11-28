@@ -220,16 +220,16 @@ class UpdateManager(
         private const val UA = "kitv-music-updater"
 
         // GitHub proxy prefixes for mainland China (official host is often blocked/slow). Prefix
-        // form: "<proxy>/https://github.com/...". Verified reachable at release time; if one dies
-        // the manager just falls through to the next. Download proxies front release binaries;
-        // API_PROXIES additionally proxy api.github.com JSON (fewer of them do).
+        // form: "<proxy>/https://github.com/...". 与 KITV 主 App 一模一样的两个（见 KITV
+        // utils/GithubProxy.java，只用这两个）；如果一个挂了，manager 会失败换下一个。
+        // Download proxies front release binaries; API_PROXIES additionally proxy api.github.com
+        // JSON（githubproxy.cc 不能代 api 时 check() 那里本来就会失败换下一个，不用担心）。
         private val DOWNLOAD_PROXIES = listOf(
-            "https://ghfast.top/",
+            "https://githubproxy.cc/",
             "https://gh-proxy.com/",
-            "https://ghproxy.net/",
-            "https://gh.ddlc.top/",
         )
         private val API_PROXIES = listOf(
+            "https://githubproxy.cc/",
             "https://gh-proxy.com/",
         )
 
