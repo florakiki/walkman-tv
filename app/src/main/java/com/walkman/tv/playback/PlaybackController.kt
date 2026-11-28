@@ -194,7 +194,7 @@ class PlaybackController(
     /** release() 后为 true：后台重连循环停掉，不再发起新连接。 */
     private var released = false
 
-    /** 增益（第二十五轮）：固定开、约 +3dB，不再有开关。GainAudioProcessor 在
+    /** 增益（第二十五轮）：固定开、约 +6dB，不再有开关。GainAudioProcessor 在
      *  :playback 进程的音频链里默认就是开的，主进程不用发命令、也不存这个值。 */
 
     /** 强制软件解码：只用系统自带的软件解码器（c2.android.* / OMX.google.*），绕开部分电视、盒子
@@ -1137,7 +1137,7 @@ class PlaybackController(
             CrashDiagnostics.recordAudioState(
                 appContext,
                 "主进程",
-                "发给服务：增益固定开（约 +3dB）" +
+                "发给服务：增益固定开（约 +6dB）" +
                     "、直通${if (audioOffloadEnabled) "开" else "关"}" +
                     "、强制软解${if (forceSoftwareDecoding) "开" else "关"}",
             )

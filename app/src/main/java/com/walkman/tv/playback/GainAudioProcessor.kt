@@ -10,7 +10,7 @@ import kotlin.math.tanh
 
 /**
  * Media3 [androidx.media3.common.audio.AudioProcessor] that adds a fixed built-in gain
- * (~+3 dB) to the PCM stream.
+ * (~+6 dB) to the PCM stream.
  *
  * Curve (2026-11-26, 替代原来的全程 tanh 软限幅)：线性增益 + 只在接近满幅处才接管的
  * 软顶 —— 输入 |x·gain| ≤ 0.85 时输出就是 x·gain（一点压缩、一点谐波都没有），超过
@@ -41,6 +41,8 @@ import kotlin.math.tanh
  *   增益恒定 +3.00 dB；0.89 峰值 THD 8.9%（原来 20.0%）。曲线形状不变
  *   （膝点仍是输出 0.85），只是固定增益从 ×1.9953 降到 ×1.4125——
  *   要的是音量稳，不是再响 3 dB。
+ * 2026-11-28：Yang 点选固定 +6 dB（知道大小声会回来），增益改回 ×1.9953，
+ *   曲线形状不变（膝点仍是输出 0.85）。
  * 注意 tanh 本身不吃高频（各频段能量比实测都在 2.4–3.0 倍之间，没有频段被切掉）：
  * “发闷（高频没了）”另有来源——解析到的实际档位低于请求档位时角标仍显示请求档位，
  * 见 PlaybackController 的探头校正 + CrashDiagnostics 的音质记录。
@@ -62,9 +64,9 @@ import kotlin.math.tanh
  */
 class GainAudioProcessor : BaseAudioProcessor() {
 
-    /** +3 dB ≈ ×1.4125. Plain var now: the gain is a fixed multiplier — the old
+    /** +6 dB ≈ ×1.9953. Plain var now: the gain is a fixed multiplier — the old
      *  tanh-normalisation factor is gone with the old curve (see [limitGain]). */
-    var gain: Float = GAIN_DB_3
+    var gain: Float = GAIN_DB_6
 
     /** Off ⇒ pure pass-through (bytes copied unchanged). */
     @Volatile var enabled: Boolean = true
@@ -193,7 +195,7 @@ class GainAudioProcessor : BaseAudioProcessor() {
     }
 
     private companion object {
-        const val GAIN_DB_3 = 1.4125f // 10^(3/20)
+        const val GAIN_DB_6 = 1.9953f // 10^(6/20)
         /** Output level where the soft ceiling starts: |x·gain| ≤ 0.85 is pure linear gain. */
         const val KNEE = 0.85
         const val INT24_MAX = 8388607 // 2^23 - 1

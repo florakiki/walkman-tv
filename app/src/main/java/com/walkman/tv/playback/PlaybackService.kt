@@ -68,7 +68,7 @@ class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
     private var player: ExoPlayer? = null
-    /** 增益（第二十五轮）：固定开、约 +3dB，没有开关也没有命令。GainAudioProcessor
+    /** 增益（第二十五轮）：固定开、约 +6dB，没有开关也没有命令。GainAudioProcessor
      *  默认就是开的（见 [GainAudioProcessor.enabled]），建播放器时直接挂进音频链，
      *  不用等主进程发什么值——撤开关不能断线，增益一直开。 */
     private lateinit var gainProcessor: GainAudioProcessor
@@ -240,7 +240,7 @@ class PlaybackService : MediaSessionService() {
             TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED
         ) "开" else "关"
         val detail = buildString {
-            appendLine("增益：固定开（约 +3dB）")
+            appendLine("增益：固定开（约 +6dB）")
             appendLine("硬件直通：$offload")
             appendLine("强制软解：${if (forceSoftwareDecoding) "开" else "关"}")
             appendLine("解码器：${decoder ?: "（还没解码）"}")
@@ -311,7 +311,7 @@ class PlaybackService : MediaSessionService() {
                     .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
                     .setAudioProcessorChain(
                         // Order matters: level meter first (measures pre-gain),
-                        // gain second (soft-limited +3 dB, see GainAudioProcessor).
+                        // gain second (soft-limited +6 dB, see GainAudioProcessor).
                         DefaultAudioSink.DefaultAudioProcessorChain(levelProcessor, gainProcessor),
                     )
                     .build()

@@ -269,17 +269,17 @@ fun SettingsScreen(modifier: Modifier = Modifier) {
         }
 
         Section("内置音量") {
-            // 第二十五轮：增益固定开（约 +3dB），开关撤掉。直通开着时增益还是被绕过，
+            // 第二十五轮：增益固定开（约 +6dB），开关撤掉。直通开着时增益还是被绕过，
             // 在这里直接说出来。
             Text(
-                "内置增益固定开启（约 +3dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
+                "内置增益固定开启（约 +6dB，带防破音软限幅），不改电视系统音量；与均衡器互不冲突。硬件直通开启时不生效。",
                 color = AppColors.TextMuted,
                 fontSize = 11.sp,
             )
             if (settings.audioOffloadEnabled) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "硬件直通已开启：音频走硬件直通，内置增益（固定 +3dB）不生效。关闭直通后增益自动生效。",
+                    "硬件直通已开启：音频走硬件直通，内置增益（固定 +6dB）不生效。关闭直通后增益自动生效。",
                     color = AppColors.Warning,
                     fontSize = 11.sp,
                 )
