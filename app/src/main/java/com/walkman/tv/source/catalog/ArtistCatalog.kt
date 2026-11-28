@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import org.json.JSONArray
@@ -310,8 +311,13 @@ class Artists(
     suspend fun hotSingers(region: SingerRegion, limit: Int = 30): List<ArtistInfo> {
         hotCache[region]?.let { if (region != SingerRegion.ALL || limit <= it.size) return it.take(limit) }
         if (region == SingerRegion.ALL) {
-            val disk = hotSingersCacheStore?.load()?.artists
-                ?.mapNotNull { it.toArtistInfo() }.orEmpty()
+            // 第二十六轮：磁盘缓存读挪 IO 线程——LaunchedEffect 跑在主线程上，
+            // 这里的同步读盘会卡住首帧后的第一帧绘制。文件虽小（12 个歌手），
+            // 但首帧路径上不留任何同步读盘。
+            val disk = withContext(Dispatchers.IO) {
+                hotSingersCacheStore?.load()?.artists
+                    ?.mapNotNull { it.toArtistInfo() }.orEmpty()
+            }
             if (disk.isNotEmpty()) {
                 hotCache[region] = disk
                 if (limit <= disk.size) {

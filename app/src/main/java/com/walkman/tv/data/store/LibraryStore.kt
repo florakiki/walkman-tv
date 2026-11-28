@@ -40,12 +40,9 @@ class LibraryStore(context: Context) {
     private val _userLists = MutableStateFlow<List<Playlist>>(emptyList())
     val userLists: StateFlow<List<Playlist>> = _userLists.asStateFlow()
 
-    init {
-        // 首帧垫底：bootstrap 里 loadAll() 是异步的，推荐页 StatsRow 第一帧会先看到
-        // 空的收藏 / 历史而闪一下“已播 0 / 收藏 0”。构造时同步读一次 library.json
-        // （一个小文件）垫底，loadAll() 稍后仍会再读一遍刷新，两边是同一份数据。
-        runCatching { store.load() }.getOrNull()?.let { applyData(it) }
-    }
+    // 第二十六轮：构造时不再同步读 library.json——首帧路径上的主线程读盘
+    // （767 首约 340KB）是首帧慢的一笔。收藏/历史先空着，bootstrap 里 loadAll()
+    // 在 IO 上读完再填，StatsRow 第一帧先显示 0，读完就刷新，不闪一下就走。
 
     /** 把一份 LibraryData 写进三个 StateFlow（loadAll() 和构造垫底共用）。 */
     private fun applyData(data: LibraryData) {

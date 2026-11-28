@@ -159,6 +159,13 @@ dependencies {
     implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.6"
     implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6"
 
+    // Baseline Profile（第二十六轮）：让系统在安装后预编译启动路径上的类，冷启动
+    // 类加载从解释执行变成本地码。配合 src/main/baseline-prof.txt（手写启动路径
+    // 类列表），AGP 会把它打进 APK 的 assets/dexopt/baseline.prof。
+    // 注意：侧载包没有 Play 的云端编译，profileinstaller 在首次启动后后台编译，
+    // 好处从第二次启动开始体现。
+    implementation "androidx.profileinstaller:profileinstaller:1.4.1"
+
     // Compose + Compose for TV
     implementation "androidx.compose.foundation:foundation"
     implementation "androidx.compose.ui:ui"

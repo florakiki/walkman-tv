@@ -71,10 +71,16 @@ data class PlaybackState(
  */
 class PlaybackController(
     context: Context,
-    private val sources: SourceManager,
-    private val lyricsFetcher: LyricsFetcher,
-    private val audioSpecProbe: AudioSpecProbe? = null,
+    sourcesProvider: () -> SourceManager,
+    lyricsFetcherProvider: () -> LyricsFetcher,
+    audioSpecProbeProvider: (() -> AudioSpecProbe?)? = null,
 ) {
+    // 第二十六轮：三个重依赖改成懒供应商——构造时不再触发 OkHttp / Catalogs /
+    // SourceManager / LyricsFetcher 的类加载和初始化（那是首帧前主线程上的一大笔）。
+    // 第一次真正播歌解析时才建出来，首帧不被它们拖住。
+    private val sources: SourceManager by lazy { sourcesProvider() }
+    private val lyricsFetcher: LyricsFetcher by lazy { lyricsFetcherProvider() }
+    private val audioSpecProbe: AudioSpecProbe? by lazy { audioSpecProbeProvider?.invoke() }
     /**
      * Real-time audio level (0..1), smoothed by the audio thread inside [AudioLevelProcessor].
      * Drives the reactive waveform in the player + recommend NowPlayingPanel. Stays at 0 when
@@ -551,11 +557,12 @@ class PlaybackController(
             // 同样验：file:// 走探头读文件，content:// 这里读头字节再验。
             // 播时换源那条路也进这个函数，所以中途换源同样验。预载的地址播到时也
             // 经过这里。MV 不走这里。
+            val gateProbe = audioSpecProbe
             val gate: AudioSpecProbe.HeadVerdict? = when {
-                audioSpecProbe == null -> null
+                gateProbe == null -> null
                 scheme == "content" -> readContentHead(r.url, track.duration)
                 else -> withTimeoutOrNull(GATE_TIMEOUT_MS) {
-                    audioSpecProbe.validate(r.url, track.duration)
+                    gateProbe.validate(r.url, track.duration)
                 } ?: AudioSpecProbe.HeadVerdict.Unknown("校验超时 ${GATE_TIMEOUT_MS}ms，放行")
             }
             val dirty = gate as? AudioSpecProbe.HeadVerdict.Dirty
@@ -630,12 +637,15 @@ class PlaybackController(
             _audioSpec.value = null
             probingUrl = r.url
             probeJob?.cancel()
-            if (audioSpecProbe != null) {
+            // 第二十六轮：audioSpecProbe 是 by lazy（自定义 getter，不能 smart cast），
+            // 先取到本地变量再用（和上面 gate 那处的 gateProbe 同名会冲突，另起名）。
+            val specProbe = audioSpecProbe
+            if (specProbe != null) {
                 val claimedQuality = r.quality
                 val songLabel = "${track.name} - ${track.singer}"
                 probeJob = scope.launch {
                     val targetUrl = r.url
-                    val spec = audioSpecProbe.probe(targetUrl)
+                    val spec = specProbe.probe(targetUrl)
                     if (probingUrl != targetUrl) return@launch
                     if (spec != null) {
                         _audioSpec.value = spec

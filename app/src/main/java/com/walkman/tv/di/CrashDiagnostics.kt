@@ -284,6 +284,21 @@ object CrashDiagnostics {
         appendFailureEntry(context, entry)
     }
 
+    /**
+     * 记首帧耗时（第二十六轮）：App.onCreate → 第一帧画出来，单位毫秒。启动慢
+     * 的排查就看这条——目标 3–5 秒。写在 MainActivity 第一帧的 withFrameNanos
+     * 回调里；只记一次（首帧），不重复写。
+     */
+    fun recordFirstFrame(context: Context, elapsedMs: Long) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[首帧] $time")
+            appendLine("耗时：${elapsedMs}ms（App.onCreate → 第一帧画出来）")
+            appendLine("目标：3000–5000ms")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
     /** 往共享诊断文件里追加一条，保留最新的 [MAX_FAILURE_ENTRIES] 条。 */
     private fun appendFailureEntry(context: Context, entry: String) {
         runCatching {

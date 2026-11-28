@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.withFrameNanos
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Modifier
 import com.walkman.tv.ui.RootScreen
 import com.walkman.tv.ui.mobile.MobileRootScreen
@@ -44,8 +46,23 @@ class MainActivity : ComponentActivity() {
             // 第二十四轮：等首帧画完再连 :playback 播放进程——冷启动时两个进程同时抢
             // 电视弱 CPU 会拖慢首帧。播歌前 ensureConnected() 也会主动发起连接，
             // 所以晚几百毫秒连不影响播放。
+            // 第二十六轮：量首帧耗时（App.onCreate → 第一帧画出来），写进诊断记录
+            // 供 Yang 在设置页“查看诊断记录”里看秒数。withFrameNanos 的帧时间是
+            // uptime 纳秒，和 App.onCreateStartMs（uptime 毫秒）同源可减。
+            // 只记一次（首帧）；超过 60 秒就是热启动（Application 早建好了），
+            // 数字没意义，不记。写盘放 IO 线程，不占主线程。
             LaunchedEffect(Unit) {
-                withFrameNanos { }
+                withFrameNanos { frameTimeNanos ->
+                    val startMs = App.onCreateStartMs
+                    if (startMs > 0L) {
+                        val elapsedMs = frameTimeNanos / 1_000_000 - startMs
+                        if (elapsedMs in 0..60_000L) {
+                            launch(Dispatchers.IO) {
+                                runCatching { CrashDiagnostics.recordFirstFrame(applicationContext, elapsedMs) }
+                            }
+                        }
+                    }
+                }
                 App.container.playbackController.startConnection()
             }
             if (isMobile) {

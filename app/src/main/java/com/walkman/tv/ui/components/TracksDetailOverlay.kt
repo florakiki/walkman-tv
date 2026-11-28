@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,10 +18,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -57,13 +62,13 @@ fun TracksDetailOverlay(
 ) {
     // 浮层入口：左边面板按右 / 顶栏按下时进浮层里的顶上内容（曲目单第 0 行）。
     val entryFocuser = remember { FocusRequester() }
+    // 第二十六轮：“全部播放”按钮的焦点请求器——歌单第 0 行按上先落到它上面，
+    // 再按上才到顶栏；焦点不出详情页。
+    val playAllFocuser = remember { FocusRequester() }
     var focusedRow by remember { mutableStateOf(-1) }
     val songListState = rememberLazyListState()
-    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）和空间搜索：
-    // 这个浮层的 TrackList 是 trapFocus=true、没有 onExitUp，歌单第 0 行按上
-    // 会被吃掉、停在原地，到不了顶栏，和歌手页专辑卡片是同一个毛病。
+    // 按上回顶栏的入口（RootScreen 提供，当前是推荐 tab 时才有值）。
     val topBarFocus = LocalTopBarFocus.current
-    val focusManager = LocalFocusManager.current
     DisposableEffect(title) {
         val entry = OverlayEntry(
             key = "tracksDetail",
@@ -96,16 +101,51 @@ fun TracksDetailOverlay(
             .padding(top = 8.dp)
             .focusGroup(),
     ) {
-        Text(
-            title,
-            color = AppColors.TextPrimary,
-            fontSize = 20.sp,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        if (!subtitle.isNullOrBlank()) {
-            Text(subtitle, color = AppColors.TextMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        // 第二十六轮：标题行 + “全部播放”按钮。点它从第一首开始播整个歌单。
+        // 焦点链：歌单第 0 行按上 → 落到这个按钮；按钮上按上 → 回顶栏（推荐 tab
+        // 才有）、没有就停住吃键；按钮上按下 → 回第 0 行。焦点不出详情页。
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = AppColors.TextPrimary,
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!subtitle.isNullOrBlank()) {
+                    Text(subtitle, color = AppColors.TextMuted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            TvPill(
+                onClick = { if (tracks.isNotEmpty()) { playList(tracks, 0); onOpenPlayer() } },
+                modifier = Modifier
+                    .padding(start = 12.dp)
+                    .onPreviewKeyEvent { e ->
+                        if (e.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                        when (e.key) {
+                            // 按上 → 回顶栏当前 tab（推荐 tab 才有）；没有顶栏就停住吃键，
+                            // 别漏到后面的歌单网格页去。
+                            Key.DirectionUp -> {
+                                topBarFocus?.invoke()
+                                true
+                            }
+                            // 按下 → 回歌单第 0 行。
+                            Key.DirectionDown -> {
+                                entryFocuser.requestFocus()
+                                true
+                            }
+                            else -> false
+                        }
+                    },
+                focusRequester = playAllFocuser,
+            ) {
+                Text("全部播放", color = AppColors.TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            }
         }
         Spacer(Modifier.height(6.dp))
         val nowId = appContainer.playbackController.state.collectAsState().value.currentTrack?.id
@@ -117,10 +157,10 @@ fun TracksDetailOverlay(
             trapFocus = true,
             onFocusedIndexChange = { focusedRow = it },
             onExitUp = {
-                // 歌单第 0 行按上 → 回顶栏当前 tab（和歌手页专辑卡片按上同一条路）。
-                if (topBarFocus?.invoke() != true) {
-                    focusManager.moveFocus(FocusDirection.Up)
-                }
+                // 第二十六轮：歌单第 0 行按上 → 落到“全部播放”按钮，不再往后面的
+                // 歌单网格页漏（原来这里回顶栏，歌单 tab 没有顶栏就 moveFocus(Up)
+                // 漏到后面页去了）。按钮上再按上才回顶栏、没有就停住。
+                playAllFocuser.requestFocus()
             },
             listState = songListState,
             entryFocuser = entryFocuser,

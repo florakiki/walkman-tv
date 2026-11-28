@@ -2,6 +2,7 @@ package com.walkman.tv
 
 import android.app.Application
 import android.os.Build
+import android.os.SystemClock
 import com.walkman.tv.di.AppContainer
 import com.walkman.tv.di.CrashDiagnostics
 import com.whl.quickjs.android.QuickJSLoader
@@ -10,12 +11,16 @@ import java.io.File
 class App : Application() {
 
     override fun onCreate() {
+        // 第二十六轮：记 onCreate 起点（uptime 毫秒），供 MainActivity 量首帧耗时。
+        onCreateStartMs = SystemClock.uptimeMillis()
         super.onCreate()
         instance = this
         // 诊断（第十六轮）：写进程名和分流结果进诊断文件，下次启动闪退时能看到
         // 是主进程还是 :playback 进程、这里有没有把主进程误判成播放进程。
         val playback = isPlaybackProcess()
-        runCatching { CrashDiagnostics.recordStartup(this, currentProcessName(), playback) }
+        // 第二十六轮：recordStartup（诊断文件整读整写）挪后台线程，不占首帧。
+        // :playback 进程也记（早退前就记上）。
+        Thread({ runCatching { CrashDiagnostics.recordStartup(this, currentProcessName(), playback) } }, "startup-record").start()
         // :playback 进程只跑播放器（第十五轮）：不初始化 QuickJS、容器、设置和 UI 状态。
         // Application.onCreate 每个进程都会跑，不分流的话 :playback 会白白建一套容器、
         // 起一遍 bootstrap，还多占一份内存。播放器由 PlaybackService 自己建。
@@ -52,5 +57,7 @@ class App : Application() {
             private set
         lateinit var container: AppContainer
             private set
+        // 第二十六轮：App.onCreate 进来的时间（uptime 毫秒），供 MainActivity 量首帧耗时。
+        @Volatile var onCreateStartMs: Long = 0L
     }
 }

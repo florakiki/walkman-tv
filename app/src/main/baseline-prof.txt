@@ -1,0 +1,60 @@
+# Baseline Profile（第二十六轮，手写）
+# 冷启动类加载是首帧慢的最大头（1–3 秒，无 Profile 时解释执行）。这份手写
+# Profile 列出启动路径上的类，AGP 会把它打进 APK 的 assets/dexopt/baseline.prof，
+# 系统在安装后预编译这些类，第二次启动起冷启动变快。
+# 注意：侧载包没有 Play 的云端编译，profileinstaller 在首次启动后后台编译，
+# 好处从第二次启动开始体现。类名写错了会被系统忽略，不影响启动。
+# 格式：一行一个类，L<包路径>/<类名>;。Composable 函数写在它所在文件的 Kt 类里
+# （如 TracksDetailOverlay.kt → TracksDetailOverlayKt）。
+
+# --- App 启动入口 ---
+Lcom/walkman/tv/App;
+Lcom/walkman/tv/MainActivity;
+Lcom/walkman/tv/di/AppContainer;
+Lcom/walkman/tv/di/CrashDiagnostics;
+Lcom/walkman/tv/di/LocalServer;
+
+# --- 播放（主进程控制器 + :playback 服务） ---
+Lcom/walkman/tv/playback/PlaybackController;
+Lcom/walkman/tv/playback/PlaybackService;
+Lcom/walkman/tv/playback/LyricsFetcher;
+Lcom/walkman/tv/playback/AudioSpecProbe;
+Lcom/walkman/tv/playback/download/DownloadCoordinator;
+
+# --- 音源 / 歌单数据层 ---
+Lcom/walkman/tv/source/SourceManager;
+Lcom/walkman/tv/source/catalog/CatalogHttp;
+Lcom/walkman/tv/source/catalog/Catalogs;
+Lcom/walkman/tv/source/catalog/Artists;
+
+# --- 本地存储 ---
+Lcom/walkman/tv/data/store/SettingsStore;
+Lcom/walkman/tv/data/store/LibraryStore;
+Lcom/walkman/tv/data/store/JsonStore;
+Lcom/walkman/tv/data/store/PlaybackSnapshotStore;
+Lcom/walkman/tv/data/store/DownloadStore;
+Lcom/walkman/tv/data/store/SearchHistoryStore;
+Lcom/walkman/tv/data/store/ScriptStore;
+Lcom/walkman/tv/data/store/CoverCache;
+Lcom/walkman/tv/data/store/LocalFolderStore;
+Lcom/walkman/tv/data/sync/SyncPeerStore;
+Lcom/walkman/tv/ui/recommend/HomeStore;
+
+# --- 首页 / 歌单 / 详情 UI（Composable 在 Kt 类里） ---
+Lcom/walkman/tv/ui/RootScreenKt;
+Lcom/walkman/tv/ui/recommend/RecommendScreenKt;
+Lcom/walkman/tv/ui/songlist/SonglistScreenKt;
+Lcom/walkman/tv/ui/components/TrackRowKt;
+Lcom/walkman/tv/ui/components/TvPillKt;
+Lcom/walkman/tv/ui/components/TracksDetailOverlayKt;
+Lcom/walkman/tv/ui/theme/ThemeKt;
+Lcom/walkman/tv/ui/theme/ColorKt;
+
+# --- AndroidX 启动入口（Compose 运行时 + Activity） ---
+Landroidx/activity/ComponentActivity;
+Landroidx/activity/compose/ComponentActivityKt;
+Landroidx/compose/runtime/ComposerKt;
+Landroidx/compose/runtime/CompositionKt;
+Landroidx/compose/runtime/Recomposer;
+Landroidx/compose/ui/Modifier;
+Landroidx/lifecycle/LifecycleOwner;

@@ -103,11 +103,26 @@ class HomeStore(
     private val cacheStore: JsonStore<HomeCache>? =
         cacheFile?.let { JsonStore(it, HomeCache.serializer(), HomeCache()) }
 
-    private val _state = MutableStateFlow(cacheStore?.load()?.toState() ?: HomeState())
+    // 第二十六轮：构造时不再同步读 home-cache.json——首帧路径上的主线程读盘。
+    // 第一帧先画空（加载态），缓存由下面 init 里在 IO 上读完再填（小文件，几十毫秒就到），
+    // 再由 loadIfNeeded 拉新数据刷新。
+    private val _state = MutableStateFlow(HomeState())
     val state: StateFlow<HomeState> = _state.asStateFlow()
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var loadJob: Job? = null
+
+    init {
+        // 后台读缓存垫底：不占首帧，读完就填上，首页很快就有上次的段落。
+        // 只在还没拿到真实数据时填（网络先回来了就不拿旧缓存顶掉新鲜的）。
+        scope.launch {
+            val cached = withContext(Dispatchers.IO) { runCatching { cacheStore?.load() }.getOrNull() }
+            val cur = _state.value
+            if (cached != null && cur.heroes.isEmpty() && cur.recommendations.isEmpty()) {
+                _state.value = cached.toState()
+            }
+        }
+    }
 
     /**
      * Identity of the last load — sorted joined source keys. Re-loading the same set is a no-op.

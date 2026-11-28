@@ -169,11 +169,14 @@ class AppContainer(val appContext: Context) {
 
     fun initPlayback() {
         if (!::playbackController.isInitialized) {
+            // 第二十六轮：三个重依赖改传懒供应商——构造 PlaybackController 时不再
+            // 在主线程触发 OkHttp / Catalogs / SourceManager 的类加载和初始化，
+            // 第一次播歌解析时才建。首帧不被它们拖住。
             playbackController = PlaybackController(
                 appContext,
-                sourceManager,
-                lyricsFetcher,
-                com.walkman.tv.playback.AudioSpecProbe(httpClient),
+                sourcesProvider = { sourceManager },
+                lyricsFetcherProvider = { lyricsFetcher },
+                audioSpecProbeProvider = { com.walkman.tv.playback.AudioSpecProbe(httpClient) },
             )
             playbackController.onTrackStarted = { track ->
                 appScope.launch { libraryStore.recordHistory(track) }
@@ -319,14 +322,18 @@ class AppContainer(val appContext: Context) {
 
     /** Load persisted data and wire settings → playback. Called once at startup. */
     fun bootstrap() {
-        // 启动空白修法：先同步读上次的播放快照、只摆队列不续播（wasPlaying=false），
-        // 让左边面板第一帧就有歌，不等脚本加载完。脚本就绪后下面原来那次恢复再跑一遍
-        // （同队列是幂等的），上次在播时才真正 playAt() 续播。initPlayback() 必须已
-        // 调过（App.onCreate 里先调它再调 bootstrap），否则 playbackController 未初始化。
-        runCatching {
-            playbackController.restoreSnapshot(playbackSnapshotStore.loadSync().copy(wasPlaying = false))
-        }
+        // 第二十六轮：启动时同步读播放快照那步挪进下面 launch 的开头（IO 上读，
+        // 读完就恢复队列、不续播），不再在主线程同步读 playback.json（767 首约
+        // 270KB 解析是首帧前的一笔）。左边面板第一帧先空着，读完就填上。
+        // initPlayback() 必须已调过（App.onCreate 里先调它再调 bootstrap），
+        // 否则 playbackController 未初始化。
         appScope.launch {
+            // 早恢复：先把上次的队列摆出来（只摆队列不续播，wasPlaying=false），
+            // 让左边面板不用等脚本加载完就有歌；脚本就绪后下面原来那次恢复再跑
+            // 一遍（同队列是幂等的），上次在播时才真正 playAt() 续播。
+            runCatching {
+                playbackController.restoreSnapshot(playbackSnapshotStore.load().copy(wasPlaying = false))
+            }
             // 第二十四轮：局域网 HTTP 服务（NanoHTTPD 绑端口）挪后台线程起，不占主线程
             // 的首帧时间。只影响扫码 / 同步功能，首页不依赖它。
             if (localServer == null) {
@@ -350,10 +357,16 @@ class AppContainer(val appContext: Context) {
                 // 硬件直通会把未解码的数据直接交给音频硬件，绕过解码器；强制软解时一并关掉。
                 playbackController.setAudioOffloadEnabled(s.audioOffloadEnabled && !s.forceSoftwareDecoding)
                 playbackController.forceSoftwareDecoding = s.forceSoftwareDecoding
-                sourceManager.fallbackEnabled = s.fallbackEnabled
                 downloadStore.configuredRoot = s.customDownloadDir?.let { java.io.File(it) }
                 downloadStore.downloadTreeUri = s.customDownloadTreeUri?.let { runCatching { android.net.Uri.parse(it) }.getOrNull() }
-                downloadCoordinator.setMaxConcurrent(s.maxConcurrentDownloads)
+                // 第二十六轮：sourceManager / downloadCoordinator 的初始化（OkHttp、
+                // Catalogs、SourceManager 的类加载）不在主线程做——挪到 IO 线程上建，
+                // 首帧不被拖住。播歌解析、下载真正用到它们时才建好，设置值到时已应用上
+                //（fallbackEnabled 默认就是 true，晚一点应用也不影响）。
+                appScope.launch(Dispatchers.IO) {
+                    sourceManager.fallbackEnabled = s.fallbackEnabled
+                    downloadCoordinator.setMaxConcurrent(s.maxConcurrentDownloads)
+                }
             }.launchIn(appScope)
             // 第二十四轮：QuickJS native 库在 App.onCreate 里挪后台线程加载了，
             // 这里等它就绪再加载脚本，免得 QuickJSContext.create() 撞上未加载的库。
