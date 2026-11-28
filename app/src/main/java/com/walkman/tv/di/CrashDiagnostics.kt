@@ -128,6 +128,23 @@ object CrashDiagnostics {
     }
 
     /**
+     * 记一次焦点防护触发（1.0.1 兜底）：Compose 1.6.8 的焦点搜索在焦点节点已脱离时抛
+     * "inactive hierarchy"，MainActivity.dispatchKeyEvent 拦住它、把按键吃掉，App 不闪退。
+     * 只记触发过，不弹框。跟播放失败写同一个文件、同一个查看入口（设置 → 查看诊断记录）。
+     */
+    fun recordFocusGuard(context: Context, detail: String) {
+        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val entry = buildString {
+            appendLine("[焦点防护] $time")
+            appendLine("页面：$currentScreen")
+            appendLine("浮层：${currentOverlay ?: "无"}")
+            appendLine("焦点：${lastFocus ?: "未知"}")
+            appendLine("详情：$detail")
+        }.trimEnd()
+        appendFailureEntry(context, entry)
+    }
+
+    /**
      * 记一条音质核对（2026-11-26）：探头实测档位低于请求档位，或探头不认这个容器时，
      * 记哪首歌、请求的是什么档位、实测到的是什么。跟播放失败写同一个文件、同一个查看
      * 入口（设置 → 查看诊断记录），只留最近 [MAX_FAILURE_ENTRIES] 条。只在有落差时

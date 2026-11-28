@@ -92,7 +92,28 @@ class MainActivity : ComponentActivity() {
             CrashDiagnostics.noteKey(KeyEvent.keyCodeToString(event.keyCode))
         }
         if (App.container.events.keyInterceptor?.invoke(event) == true) return true
-        return super.dispatchKeyEvent(event)
+        return try {
+            super.dispatchKeyEvent(event)
+        } catch (e: IllegalStateException) {
+            // 1.0.1 兜底：Compose 1.6.8 的焦点搜索（TwoDimensionalFocusSearch.activeNode）
+            // 在焦点节点已脱离组合时抛 "Searching for active node in inactive hierarchy"，
+            // 按方向键移焦点就闪退。只认这一条：把这次按键吃掉、记一条诊断，App 不闪退；
+            // 其他 IllegalStateException 原样抛出去，不吞。
+            if (e.message?.contains("inactive hierarchy") == true) {
+                android.util.Log.w(
+                    "FocusGuard",
+                    "swallowed focus-search crash on ${KeyEvent.keyCodeToString(event.keyCode)}",
+                    e,
+                )
+                runCatching {
+                    CrashDiagnostics.recordFocusGuard(
+                        applicationContext,
+                        "按键 ${KeyEvent.keyCodeToString(event.keyCode)} 移焦点时节点已脱离，已拦住未闪退",
+                    )
+                }
+                true
+            } else throw e
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {

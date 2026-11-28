@@ -212,16 +212,21 @@ private fun RecommendGrid(
       horizontalArrangement = Arrangement.spacedBy(14.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+      // 1.0.1 焦点闪退修法：下面每个区段 item 都有稳定 key（之前没有，按索引复用）。
+      // 首页数据（每日30首 / 猜你喜欢 / 推荐歌单）陆续到达、区段增减时，没 key 的 item
+      // 会被 Lazy 布局按索引换掉，焦点落的那张卡片节点就被 dispose，再按方向键移焦点
+      // Compose 1.6.8 的 activeNode() 就抛 "inactive hierarchy" 闪退。歌单网格那段
+      // 本来就有 key，这里补齐；歌手行里每张卡片也用 key(singerKey) 包一层。
       when {
-        settings.homeSources.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
-        home.isLoading && home.heroes.isEmpty() -> item(span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
+        settings.homeSources.isEmpty() -> item(key = "no_sources", span = { GridItemSpan(maxLineSpan) }) { NoSourcesHint(onNavigate) }
+        home.isLoading && home.heroes.isEmpty() -> item(key = "loading", span = { GridItemSpan(maxLineSpan) }) { LoadingPlaceholder() }
         else -> {
           // 推荐页顺序（Yang 定，2026-11-27 改；排行榜专区 2026-11-27 撤掉，顶栏已有排行榜 tab）：
           // 歌手 → 已播/收藏 → 每日30首 → 猜你喜欢 → 推荐歌单。
           val songlists = home.heroes.map { it.songlist } + home.recommendations
           // 歌手入口：圆形头像横排预览，点“查看全部”进歌手浏览页（地区 tab + 头像网格）。
           if (hotSingers.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "singer_header", span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader(
                 "歌手", null,
                 trailing = "查看全部",
@@ -234,7 +239,7 @@ private fun RecommendGrid(
             // 歌手行：一排 8 个圆头像（Yang 2026-11-27 21:19 定，原来 6 个），头像 72.dp，
             // 卡片宽按行宽算（8 张 + 7 个间距 + 两边 padding），不滚动；统计行不显示，
             // 行高压到 114.dp 左右，别把下面挤下去。列表里不到 8 个时有几个放几个。
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "singer_row", span = { GridItemSpan(maxLineSpan) }) {
               val singerCardWidth = (maxWidth - 8.dp - 14.dp * 7) / 8
               Row(
                 horizontalArrangement = Arrangement.spacedBy(14.dp),
@@ -242,28 +247,30 @@ private fun RecommendGrid(
               ) {
                 hotSingers.take(8).forEach { artist ->
                   val singerKey = "singer_${artist.source.key}_${artist.id}"
-                  com.walkman.tv.ui.search.ArtistCard(
-                    artist = artist,
-                    onClick = { artistFromBrowse = false; artistEntryKey = singerKey; openArtist = artist },
-                    modifier = restore.modifierFor(singerKey),
-                    cardWidth = singerCardWidth,
-                    avatarSize = 72.dp,
-                    showStats = false,
-                  )
+                  androidx.compose.runtime.key(singerKey) {
+                    com.walkman.tv.ui.search.ArtistCard(
+                      artist = artist,
+                      onClick = { artistFromBrowse = false; artistEntryKey = singerKey; openArtist = artist },
+                      modifier = restore.modifierFor(singerKey),
+                      cardWidth = singerCardWidth,
+                      avatarSize = 72.dp,
+                      showStats = false,
+                    )
+                  }
                 }
               }
             }
           }
-          item(span = { GridItemSpan(maxLineSpan) }) { StatsRow(onNavigate) }
+          item(key = "stats_row", span = { GridItemSpan(maxLineSpan) }) { StatsRow(onNavigate) }
           // 每日30首：横排卡片（前 12 首），点卡片直接播，点“查看全部”进完整 30 首列表。
           // 空的时候不画这段（接口全挂就当没有，不留空白标题）。
           if (home.daily30.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "daily30_header", span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader("每日30首", "每天更新", trailing = "查看全部") {
                 detail = DetailView("每日30首", "每天更新", home.daily30)
               }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "daily30_row", span = { GridItemSpan(maxLineSpan) }) {
               TrackCardRow(
                 tracks = home.daily30,
                 keyPrefix = "daily30",
@@ -275,12 +282,12 @@ private fun RecommendGrid(
           }
           // 猜你喜欢紧接着它：同上，横排卡片 + 查看全部。
           if (guessTracks.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "guess_header", span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader("猜你喜欢", null, trailing = "查看全部") {
                 detail = DetailView("猜你喜欢", null, guessTracks)
               }
             }
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "guess_row", span = { GridItemSpan(maxLineSpan) }) {
               TrackCardRow(
                 tracks = guessTracks,
                 keyPrefix = "guess",
@@ -292,7 +299,7 @@ private fun RecommendGrid(
           }
           // 推荐歌单放最后：每平台的第一张（heroes）+ 其余推荐，全部摊平成卡片网格，能往下滚。
           if (songlists.isNotEmpty()) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "songlist_header", span = { GridItemSpan(maxLineSpan) }) {
               SectionHeader("推荐歌单", null, trailing = "查看全部") {
                 onNavigate(NavSection.Songlist)
               }
